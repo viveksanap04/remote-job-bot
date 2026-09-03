@@ -1,0 +1,56 @@
+name: Remote AI ML Job Bot
+
+on:
+
+  workflow_dispatch:
+
+  schedule:
+    - cron: "0 * * * *"
+
+
+jobs:
+
+  check-jobs:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install packages
+        run: |
+          pip install feedparser
+          pip install requests
+          pip install python-dotenv
+          pip install beautifulsoup4
+
+      - name: Create sent_jobs.json
+        run: |
+          if [ ! -f sent_jobs.json ]; then
+            echo "[]" > sent_jobs.json
+          fi
+
+      - name: Run job bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: |
+          python jobs.py
+
+      - name: Save sent jobs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add sent_jobs.json
+
+          git diff --cached --quiet || git commit -m "Update sent jobs"
+
+          git push
