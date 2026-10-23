@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vishes AI Career Intelligence</title>
+  <style>
+    :root { --ink:#18212b; --muted:#66727d; --paper:#f6f3ed; --panel:#fffdf8; --line:#ddd7cc; --accent:#d65b3d; --teal:#146c70; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--ink); background:radial-gradient(circle at 85% 0%, #dbe9e2, transparent 30rem), var(--paper); font:15px Georgia, serif; }
+    header { max-width:1180px; margin:auto; padding:42px 24px 24px; display:flex; justify-content:space-between; align-items:end; gap:20px; }
+    h1 { margin:0; font-size:clamp(2rem,5vw,4.4rem); line-height:.95; font-weight:500; letter-spacing:0; max-width:620px; }
+    .status { color:var(--teal); font-family:system-ui,sans-serif; font-size:.8rem; text-transform:uppercase; letter-spacing:.08em; }
+    main { max-width:1180px; margin:auto; padding:0 24px 48px; }
+    .toolbar { display:flex; gap:10px; margin:12px 0 28px; font-family:system-ui,sans-serif; }
+    input, button { border:1px solid var(--line); background:var(--panel); padding:11px 13px; border-radius:4px; font:inherit; }
+    button { background:var(--ink); color:white; cursor:pointer; }
+    .layout { display:grid; grid-template-columns:1.5fr 1fr; gap:18px; }
+    section { background:var(--panel); border:1px solid var(--line); padding:20px; }
+    h2 { margin:0 0 16px; font-size:1.25rem; font-weight:500; }
+    .job, .news { border-top:1px solid var(--line); padding:15px 0; }
+    .job:first-child, .news:first-child { border-top:0; padding-top:0; }
+    .job h3, .news h3 { margin:0 0 6px; font-size:1.08rem; font-weight:600; }
+    .meta { color:var(--muted); font-family:system-ui,sans-serif; font-size:.82rem; line-height:1.5; }
+    a { color:var(--accent); text-decoration:none; }
+    .score { float:right; color:var(--teal); font-family:system-ui,sans-serif; font-weight:700; }
+    @media (max-width:760px) { header { display:block; } .status { margin-top:18px; } .layout { grid-template-columns:1fr; } .toolbar { flex-wrap:wrap; } input { flex:1; min-width:180px; } }
+  </style>
+</head>
+<body>
+  <header><h1>Vishes AI<br>Career Intelligence</h1><div class="status" id="status">Connecting to API</div></header>
+  <main>
+    <div class="toolbar"><input id="location" placeholder="Filter location"><button onclick="loadData()">Refresh</button></div>
+    <div class="layout">
+      <section><h2>Priority jobs</h2><div id="jobs">Loading...</div></section>
+      <div>
+        <section><h2>Skill demand</h2><div id="skills">Loading...</div></section>
+        <section style="margin-top:18px"><h2>AI news</h2><div id="news">Loading...</div></section>
+      </div>
+    </div>
+  </main>
+  <script>
+    const api = 'http://127.0.0.1:8000';
+    const esc = value => String(value || '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
+    async function loadData() {
+      try {
+        const location = encodeURIComponent(document.getElementById('location').value);
+        const [jobs, news, skills] = await Promise.all([
+          fetch(`${api}/jobs?minimum_score=35&location=${location}`).then(response => response.json()),
+          fetch(`${api}/news?limit=8`).then(response => response.json()),
+          fetch(`${api}/skills`).then(response => response.json())
+        ]);
+        document.getElementById('status').textContent = 'Live intelligence feed';
+        document.getElementById('jobs').innerHTML = jobs.length ? jobs.map(job => `<article class="job"><span class="score">${job.score}/100</span><h3>${esc(job.title)}</h3><div class="meta">${esc(job.company)} · ${esc(job.location)} · ${esc(job.experience)}<br><a href="${esc(job.application_url || job.listing_url)}" target="_blank" rel="noreferrer">Open application</a></div></article>`).join('') : '<div class="meta">No matching jobs yet.</div>';
+        document.getElementById('skills').innerHTML = skills.slice(0, 10).map(item => `<div class="meta" style="padding:5px 0">${esc(item.skill)} <strong style="float:right">${item.demand}</strong></div>`).join('') || '<div class="meta">No skill data yet.</div>';
+        document.getElementById('news').innerHTML = news.map(item => `<article class="news"><h3><a href="${esc(item.url)}" target="_blank" rel="noreferrer">${esc(item.title)}</a></h3><div class="meta">${esc(item.source)} · importance ${item.importance}</div></article>`).join('') || '<div class="meta">No news collected yet.</div>';
+      } catch (error) { document.getElementById('status').textContent = 'API unavailable'; }
+    }
+    loadData();
+  </script>
+</body>
+</html>

@@ -1,21 +1,57 @@
+import certifi
 import feedparser
 import os
 import requests
 import json
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from pathlib import Path
+
 from bs4 import BeautifulSoup
+from career_engine import (
+    initialize_database,
+    is_known_job,
+    normalize_url,
+    score_job,
+    save_job,
+)
 from dotenv import load_dotenv
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 
-load_dotenv()
-
-BOT_TOKEN=os.getenv("BOT_TOKEN")
-CHAT_ID=os.getenv("CHAT_ID")
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 
 
-with open("sent_jobs.json","r") as file:
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
-    sent_jobs=json.load(file)
+missing_telegram_config = [
+    name
+    for name, value in (("BOT_TOKEN", BOT_TOKEN), ("CHAT_ID", CHAT_ID))
+    if not value
+]
+if missing_telegram_config:
+    raise SystemExit(
+        "Missing Telegram configuration: "
+        + ", ".join(missing_telegram_config)
+        + ". Set these in the repository .env file or GitHub Actions secrets."
+    )
+
+SENT_JOBS_PATH = BASE_DIR / "sent_jobs.json"
+
+if SENT_JOBS_PATH.exists():
+    with SENT_JOBS_PATH.open(encoding="utf-8") as file:
+        sent_jobs = json.load(file)
+    if not isinstance(sent_jobs, list) or any(not isinstance(link, str) for link in sent_jobs):
+        raise ValueError(f"{SENT_JOBS_PATH} must contain a JSON array of URL strings")
+else:
+    sent_jobs = []
+
+sent_job_urls = {normalize_url(link) for link in sent_jobs}
+
+
+initialize_database()
 
 
 def send_telegram(message):
@@ -32,9 +68,11 @@ def send_telegram(message):
         response=requests.post(
             url,
             data=data,
-            timeout=15
+            timeout=15,
+            verify=certifi.where()
         )
 
+        response.raise_for_status()
         result=response.json()
 
         print("Telegram:",result)
@@ -54,6 +92,82 @@ def send_telegram(message):
 
 def get_application_link(job_url):
 
+    blocked_domains=(
+        "weworkremotely.com",
+        "remoteok.com",
+        "linkedin.com",
+        "facebook.com",
+        "twitter.com",
+        "x.com",
+        "instagram.com",
+        "youtube.com",
+    )
+
+    application_domains=(
+        "greenhouse.io",
+        "lever.co",
+        "ashbyhq.com",
+        "workable.com",
+        "smartrecruiters.com",
+        "myworkdayjobs.com",
+        "jobvite.com",
+        "icims.com",
+    )
+
+    application_words=(
+        "apply",
+        "application",
+        "start application",
+        "apply now",
+        "apply for this job",
+        "submit application",
+    )
+
+    def is_blocked(url):
+
+        hostname=urlparse(url).hostname or ""
+
+        hostname=hostname.lower().removeprefix("www.")
+
+        return any(
+            hostname == domain or hostname.endswith(f".{domain}")
+            for domain in blocked_domains
+        )
+
+    def candidate_score(url, label):
+
+        if not url.startswith(("http://", "https://")):
+
+            return -1
+
+        if is_blocked(url):
+
+            return -1
+
+        hostname=(urlparse(url).hostname or "").lower()
+
+        score=0
+
+        if any(
+            hostname == domain or hostname.endswith(f".{domain}")
+            for domain in application_domains
+        ):
+
+            score+=100
+
+        if any(word in label for word in application_words):
+
+            score+=80
+
+        if any(
+            word in url.lower()
+            for word in ("apply", "application", "careers", "jobs")
+        ):
+
+            score+=20
+
+        return score
+
     try:
 
         response=requests.get(
@@ -61,52 +175,39 @@ def get_application_link(job_url):
             timeout=10,
             headers={
                 "User-Agent":"Mozilla/5.0"
-            }
+            },
+            verify=certifi.where()
         )
 
         soup=BeautifulSoup(response.text,"html.parser")
 
-        links=soup.find_all("a",href=True)
+        candidates=[]
 
+        for link in soup.find_all("a",href=True):
 
-        for link in links:
+            full_url=urljoin(job_url,link["href"])
 
-            href=link["href"]
+            label=" ".join(
+                value
+                for value in (
+                    link.get_text(" ",strip=True),
+                    link.get("aria-label",""),
+                    link.get("title",""),
+                )
+                if value
+            ).lower()
 
-            text=link.get_text(" ",strip=True).lower()
+            score=candidate_score(full_url,label)
 
-            full_url=urljoin(job_url,href)
+            if score >= 80:
 
+                candidates.append((score,full_url))
 
-            if "weworkremotely.com/job-seekers" in full_url:
+        if candidates:
 
-                continue
+            candidates.sort(key=lambda candidate: candidate[0],reverse=True)
 
-
-            if "remoteok.com" in full_url:
-
-                continue
-
-
-            if "apply" in text or "application" in text:
-
-                if full_url.startswith("http"):
-
-                    return full_url
-
-
-        for link in links:
-
-            href=link["href"]
-
-            full_url=urljoin(job_url,href)
-
-
-            if "weworkremotely.com" not in full_url and "remoteok.com" not in full_url:
-
-                if full_url.startswith("http"):
-
-                    return full_url
+            return candidates[0][1]
 
 
         return job_url
@@ -117,6 +218,102 @@ def get_application_link(job_url):
         print("Application link error:",msg)
 
         return job_url
+
+
+def get_himalayas_jobs():
+
+    try:
+
+        url="https://himalayas.app/jobs/api?limit=20"
+
+        response=requests.get(
+            url,
+            timeout=15,
+            headers={
+                "User-Agent":"Mozilla/5.0"
+            },
+            verify=certifi.where()
+        )
+
+        data=response.json()
+
+        jobs=[]
+
+
+        for job in data.get("jobs",[]):
+
+            title=job.get("title","")
+
+            description=job.get("description","")
+
+            job_link=job.get("applicationLink","")
+
+            company=job.get("companyName","")
+
+            seniority=job.get("seniority","")
+
+            min_salary=job.get("minSalary")
+
+            max_salary=job.get("maxSalary")
+
+            currency=job.get("currency","")
+
+            location_restrictions=job.get(
+                "locationRestrictions",
+                []
+            )
+
+            published = (
+                job.get("pubDate")
+                or job.get("publishedAt")
+                or job.get("createdAt")
+                or job.get("datePosted")
+                or ""
+            )
+            closing = (
+                job.get("expirationDate")
+                or job.get("expiresAt")
+                or job.get("validThrough")
+                or job.get("applicationDeadline")
+                or job.get("deadline")
+                or ""
+            )
+
+            jobs.append({
+
+                "title":title,
+
+                "summary":description,
+
+                "link":job_link,
+
+                "company":company,
+
+                "seniority":seniority,
+
+                "min_salary":min_salary,
+
+                "max_salary":max_salary,
+
+                "currency":currency,
+
+                "location_restrictions":location_restrictions,
+
+                "published":published,
+
+                "closing":closing
+
+            })
+
+
+        return jobs
+
+
+    except Exception as msg:
+
+        print("Himalayas error:",msg)
+
+        return []
 
 
 def get_remote_ok_jobs():
@@ -130,7 +327,8 @@ def get_remote_ok_jobs():
             timeout=15,
             headers={
                 "User-Agent":"Mozilla/5.0"
-            }
+            },
+            verify=certifi.where()
         )
 
         data=response.json()
@@ -158,9 +356,17 @@ def get_remote_ok_jobs():
 
 
             jobs.append({
+
                 "title":title,
+
                 "summary":description,
-                "link":job_link
+
+                "link":job_link,
+
+                "published":job.get("date") or job.get("epoch") or "",
+
+                "closing":job.get("expiration_date") or job.get("deadline") or ""
+
             })
 
 
@@ -174,7 +380,149 @@ def get_remote_ok_jobs():
         return []
 
 
-job_sources = [
+def get_remotive_jobs():
+
+    try:
+
+        url="https://remotive.com/api/remote-jobs?limit=20"
+
+        response=requests.get(
+            url,
+            timeout=15,
+            headers={
+                "User-Agent":"Mozilla/5.0"
+            },
+            verify=certifi.where()
+        )
+
+        data=response.json()
+
+        jobs=[]
+
+        for job in data.get("jobs",[]):
+
+            jobs.append({
+
+                "title":job.get("title",""),
+
+                "summary":job.get("description",""),
+
+                "link":job.get("url",""),
+
+                "company":job.get("company_name",""),
+
+                "location":job.get("candidate_required_location",""),
+
+                "salary":job.get("salary",""),
+
+                "published":job.get("publication_date",""),
+
+                "closing":job.get("expiration_date") or job.get("deadline") or ""
+
+            })
+
+        return jobs
+
+
+    except Exception as msg:
+
+        print("Remotive error:",msg)
+
+        return []
+
+
+def get_jobicy_jobs():
+    """Fetch recent remote jobs from Jobicy's public API (no API key)."""
+    try:
+        response = requests.get(
+            "https://jobicy.com/api/v2/remote-jobs",
+            params={"count": 100},
+            timeout=20,
+            headers={"Accept": "application/json", "User-Agent": "VishesCareerBot/1.0"},
+            verify=certifi.where(),
+        )
+        response.raise_for_status()
+        data = response.json()
+        jobs = []
+        for item in data.get("jobs", []):
+            title = item.get("jobTitle") or item.get("title") or ""
+            link = item.get("url") or item.get("jobUrl") or item.get("applicationLink") or ""
+            description = item.get("jobDescription") or item.get("jobExcerpt") or item.get("description") or ""
+            if not title or not link:
+                continue
+            jobs.append({
+                "title": title,
+                "summary": description,
+                "link": link,  # Preserve Jobicy's canonical listing URL/source attribution.
+                "company": item.get("companyName") or item.get("company") or "",
+                "location": item.get("jobGeo") or item.get("location") or item.get("geo") or "Remote",
+                "salary": item.get("annualSalary") or item.get("salary") or "",
+                "published": (
+                    item.get("pubDate")
+                    or item.get("publishedAt")
+                    or item.get("datePosted")
+                    or item.get("createdAt")
+                    or ""
+                ),
+                "closing": (
+                    item.get("expirationDate")
+                    or item.get("expiresAt")
+                    or item.get("validThrough")
+                    or item.get("applicationDeadline")
+                    or item.get("deadline")
+                    or ""
+                ),
+            })
+        return jobs
+    except (requests.RequestException, ValueError) as error:
+        print(f"Jobicy error: {error}")
+        return []
+
+
+def get_arbeitnow_jobs():
+    """Fetch public listings from Arbeitnow's job-board API."""
+    try:
+        response = requests.get(
+            "https://www.arbeitnow.com/api/job-board-api",
+            timeout=20,
+            headers={"Accept": "application/json", "User-Agent": "VishesCareerBot/1.0"},
+            verify=certifi.where(),
+        )
+        response.raise_for_status()
+        data = response.json()
+        jobs = []
+        for item in data.get("data", []):
+            title = item.get("title", "")
+            link = item.get("url", "")
+            if not title or not link:
+                continue
+            tags = item.get("tags", []) or []
+            description = item.get("description", "")
+            if tags:
+                description = f"{description} {' '.join(str(tag) for tag in tags)}"
+            jobs.append({
+                "title": title,
+                "summary": description,
+                "link": link,
+                "company": item.get("company_name", ""),
+                "location": item.get("location", ""),
+                "salary": item.get("salary", ""),
+                "published": item.get("created_at", ""),
+                "closing": (
+                    item.get("expiration_date")
+                    or item.get("expires_at")
+                    or item.get("valid_through")
+                    or item.get("deadline")
+                    or ""
+                ),
+            })
+        return jobs
+    except (requests.RequestException, ValueError) as error:
+        print(f"Arbeitnow error: {error}")
+        return []
+
+
+job_sources=[
 
     {
         "name":"We Work Remotely",
@@ -186,12 +534,36 @@ job_sources = [
         "name":"Remote OK",
         "type":"api",
         "url":"https://remoteok.com/api"
+    },
+
+    {
+        "name":"Himalayas",
+        "type":"himalayas",
+        "url":"https://himalayas.app/jobs/api"
+    },
+
+    {
+        "name":"Remotive",
+        "type":"remotive",
+        "url":"https://remotive.com/api/remote-jobs?limit=20"
+    },
+
+    {
+        "name":"Jobicy",
+        "type":"jobicy",
+        "url":"https://jobicy.com/api/v2/remote-jobs?count=100"
+    },
+
+    {
+        "name":"Arbeitnow",
+        "type":"arbeitnow",
+        "url":"https://www.arbeitnow.com/api/job-board-api"
     }
 
 ]
 
 
-ai_title_keywords = [
+ai_title_keywords=[
 
     "ai engineer",
     "artificial intelligence engineer",
@@ -219,7 +591,7 @@ ai_title_keywords = [
 ]
 
 
-ai_technology_keywords = [
+ai_technology_keywords=[
 
     "rag",
     "retrieval augmented generation",
@@ -238,7 +610,7 @@ ai_technology_keywords = [
 ]
 
 
-entry_keywords = [
+entry_keywords=[
 
     "junior",
     "entry level",
@@ -257,7 +629,7 @@ entry_keywords = [
 ]
 
 
-senior_keywords = [
+senior_keywords=[
 
     "senior",
     "lead",
@@ -268,6 +640,21 @@ senior_keywords = [
     "head of"
 
 ]
+
+def format_job_date(value):
+    if not value:
+        return "Not provided by source"
+    try:
+        if isinstance(value, (int, float)) or str(value).isdigit():
+            parsed = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        else:
+            try:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except ValueError:
+                parsed = parsedate_to_datetime(str(value))
+        return parsed.strftime("%Y-%m-%d")
+    except (OverflowError, OSError, TypeError, ValueError):
+        return str(value)
 
 
 for source in job_sources:
@@ -283,12 +670,42 @@ for source in job_sources:
 
         feed=feedparser.parse(source_url)
 
-        jobs=feed.entries
+        jobs=[
+            {
+                **entry,
+                "published": entry.get("published", ""),
+                "closing": entry.get("expirationDate") or entry.get("deadline") or "",
+            }
+            for entry in feed.entries
+        ]
 
 
     elif source["type"]=="api":
 
         jobs=get_remote_ok_jobs()
+
+
+    elif source["type"]=="himalayas":
+
+        jobs=get_himalayas_jobs()
+
+
+    elif source["type"]=="remotive":
+
+        jobs=get_remotive_jobs()
+
+    elif source["type"]=="jobicy":
+
+        jobs=get_jobicy_jobs()
+
+    elif source["type"]=="arbeitnow":
+
+        jobs=get_arbeitnow_jobs()
+
+
+    else:
+
+        jobs=[]
 
 
     print("Jobs found:",len(jobs))
@@ -302,6 +719,22 @@ for source in job_sources:
 
         text=title+" "+description
 
+        company=job.get("company","")
+
+        job_link=normalize_url(job.get("link",""))
+
+        analysis=score_job(
+            job.get("title",""),
+            job.get("summary",""),
+            company,
+            job.get("location","") or job.get("location_restrictions",""),
+            job.get("salary","")
+        )
+
+        if not company:
+
+            analysis["dedupe_key"]="url:"+job_link
+
 
         is_ai=False
 
@@ -312,8 +745,6 @@ for source in job_sources:
         matched_keywords=[]
 
 
-        # Check strong AI/ML job titles
-
         for keyword in ai_title_keywords:
 
             if keyword in title:
@@ -322,8 +753,6 @@ for source in job_sources:
 
                 matched_keywords.append(keyword)
 
-
-        # Check AI technologies ONLY in the job title
 
         for keyword in ai_technology_keywords:
 
@@ -334,8 +763,6 @@ for source in job_sources:
                 matched_keywords.append(keyword)
 
 
-        # Check entry-level signals in title + description
-
         for keyword in entry_keywords:
 
             if keyword in text:
@@ -344,8 +771,6 @@ for source in job_sources:
 
                 break
 
-
-        # Check senior signals ONLY in title
 
         for keyword in senior_keywords:
 
@@ -360,15 +785,13 @@ for source in job_sources:
 
             job_title=job.get("title","")
 
-            job_link=job.get("link","")
-
 
             if not job_link:
 
                 continue
 
 
-            if job_link in sent_jobs:
+            if job_link in sent_job_urls or is_known_job(analysis["dedupe_key"]):
 
                 print("ALREADY SENT - SKIPPING")
 
@@ -379,12 +802,42 @@ for source in job_sources:
                 continue
 
 
-            # Remove duplicate keywords
+            matched_keywords=list(
+                dict.fromkeys(matched_keywords)
+            )
 
-            matched_keywords=list(dict.fromkeys(matched_keywords))
 
+            if source_name in {"Himalayas", "Jobicy", "Arbeitnow"}:
 
-            application_link=get_application_link(job_link)
+                # Keep the source's canonical job page; avoid guessing a third-party apply URL.
+                application_link=job_link
+
+            else:
+
+                application_link=get_application_link(
+                    job_link
+                )
+
+            normalized_job=dict(job)
+
+            normalized_job.update({
+                "source":source_name,
+                "link":job_link,
+                "application_link":application_link,
+                "analysis":analysis
+            })
+
+            salary=analysis["salary"]
+
+            salary_text="Not specified"
+
+            if salary["min"] is not None:
+
+                salary_text=(
+                    f'{salary["currency"]} '
+                    f'{salary["min"]:,.0f}-{salary["max"]:,.0f} '
+                    f'{salary["period"]}'.strip()
+                )
 
 
             print("MATCH FOUND")
@@ -398,6 +851,8 @@ for source in job_sources:
             print("AI Keywords:",matched_keywords)
 
             print("Entry Level:",is_entry)
+
+            print("Match Score:",analysis["score"])
 
             print("Link:",job_link)
 
@@ -419,6 +874,27 @@ Job:
 🎯 Entry Level:
 {"YES" if is_entry else "Not specified"}
 
+🧠 Skills:
+{" • ".join(analysis["skills"]) or "Not specified"}
+
+🎯 Experience:
+{analysis["experience"]}
+
+📅 Posted:
+{format_job_date(job.get("published"))}
+
+⏳ Apply by:
+{format_job_date(job.get("closing"))}
+
+🌍 Location:
+{analysis["location"]}
+
+💰 Salary:
+{salary_text}
+
+⭐ Match:
+{analysis["match"]} ({analysis["score"]}/100)
+
 🔗 Apply:
 {application_link}
 """
@@ -429,17 +905,27 @@ Job:
 
             if telegram_sent:
 
+                save_job(normalized_job)
+
                 sent_jobs.append(job_link)
+                sent_job_urls.add(job_link)
 
+                with SENT_JOBS_PATH.open("w", encoding="utf-8") as file:
 
-                with open("sent_jobs.json","w") as file:
-
-                    json.dump(sent_jobs,file,indent=4)
+                    json.dump(
+                        sent_jobs,
+                        file,
+                        indent=4
+                    )
 
                 print("SAVED TO sent_jobs.json")
 
+
             else:
 
-                print("NOT SAVED - Telegram notification failed")
+                print(
+                    "NOT SAVED - Telegram notification failed"
+                )
+
 
             print("--------------------")
