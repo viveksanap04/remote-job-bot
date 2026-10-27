@@ -128,6 +128,8 @@ def dedupe_key(title, company=""):
 
 
 def score_job(title, description, company="", location="", salary=""):
+    if isinstance(location, (list, tuple)):
+        location = ", ".join(normalize_text(value) for value in location)
     text = " ".join((title, description, company, location, salary))
     lowered = text.lower()
     skills = extract_skills(text)
