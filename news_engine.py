@@ -1,21 +1,24 @@
 import hashlib
-import os
 import re
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from urllib.parse import urljoin
 
 import certifi
 import feedparser
 import requests
 from bs4 import BeautifulSoup
-from dotenv import load_dotenv
 
-from career_engine import DB_PATH, initialize_database, normalize_text, normalize_url
-
-
-load_dotenv(Path(__file__).resolve().with_name(".env"))
+from career_engine import (
+    DB_PATH,
+    INDIA_TIMEZONE,
+    initialize_database,
+    normalize_text,
+    normalize_url,
+    record_collection_run,
+)
+from telegram_utils import send_telegram_message
 
 
 NEWS_SOURCES = (
@@ -52,6 +55,21 @@ def importance_score(title, summary):
     return min(100, 20 + sum(8 for term in IMPORTANT_TERMS if term in text))
 
 
+def topic_category(title, summary):
+    text = f"{title} {summary}".lower()
+    categories = (
+        ("Models and releases", ("model", "release", "launch")),
+        ("Research", ("research", "paper", "study", "arxiv")),
+        ("AI safety and policy", ("safety", "policy", "alignment", "governance")),
+        ("Developer tools and infrastructure", ("developer", "tool", "infrastructure", "open source")),
+        ("Agents and applications", ("agent", "application", "product")),
+    )
+    return next(
+        (category for category, terms in categories if any(term in text for term in terms)),
+        "AI industry",
+    )
+
+
 def content_tokens(title, summary):
     words = re.findall(r"[a-z0-9]{3,}", f"{title} {summary}".lower())
     return {word for word in words if word not in STOP_WORDS}
@@ -77,20 +95,25 @@ def ensure_news_columns(connection):
         connection.execute("ALTER TABLE news ADD COLUMN content_hash TEXT")
     if "digest_sent_at" not in columns:
         connection.execute("ALTER TABLE news ADD COLUMN digest_sent_at TEXT")
+    if "category" not in columns:
+        connection.execute("ALTER TABLE news ADD COLUMN category TEXT")
 
 
 def parse_feed(source, response):
     feed = feedparser.parse(response.content)
-    return [
+    if feed.bozo:
+        raise ValueError(f"{source} returned an invalid RSS feed")
+    entries = [
         {
             "url": entry.get("link", ""),
             "title": normalize_text(entry.get("title", "")),
             "summary": normalize_text(entry.get("summary", "")),
-            "published": entry.get("published", ""),
+            "published": entry.get("published", "") or entry.get("updated", ""),
             "source": source,
         }
         for entry in feed.entries[:30]
     ]
+    return entries
 
 
 def parse_anthropic_page(response):
@@ -107,18 +130,28 @@ def parse_anthropic_page(response):
                 "published": "",
                 "source": "Anthropic",
             })
+    if not entries:
+        raise ValueError("Anthropic news page contained no parseable articles")
     return entries
 
 
 def fetch_source(source, source_type, source_url):
-    response = requests.get(
-        source_url,
-        timeout=20,
-        headers={"User-Agent": "VishesCareerBot/1.0"},
-        verify=certifi.where(),
-    )
-    response.raise_for_status()
-    return parse_anthropic_page(response) if source_type == "web" else parse_feed(source, response)
+    last_error = None
+    for attempt in range(3):
+        try:
+            response = requests.get(
+                source_url,
+                timeout=20,
+                headers={"User-Agent": "VishesCareerBot/1.0"},
+                verify=certifi.where(),
+            )
+            response.raise_for_status()
+            return parse_anthropic_page(response) if source_type == "web" else parse_feed(source, response)
+        except requests.RequestException as error:
+            last_error = error
+            if attempt < 2:
+                time.sleep(2**attempt)
+    raise RuntimeError(f"Unable to fetch after 3 attempts: {last_error}")
 
 
 def store_news(entries, connection):
@@ -148,8 +181,8 @@ def store_news(entries, connection):
         connection.execute(
             """
             INSERT INTO news
-            (url, title, source, summary, importance, published_at, created_at, content_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (url, title, source, summary, importance, published_at, created_at, content_hash, category)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 url,
@@ -160,6 +193,7 @@ def store_news(entries, connection):
                 entry["published"],
                 datetime.now(timezone.utc).isoformat(),
                 content_hash(title, summary),
+                topic_category(title, summary),
             ),
         )
         existing.append((url, title, summary))
@@ -177,10 +211,16 @@ def fetch_news(path=DB_PATH):
         for source, source_type, source_url in NEWS_SOURCES:
             try:
                 entries = fetch_source(source, source_type, source_url)
+                new_entries = store_news(entries, connection)
+                stored.extend(new_entries)
+                connection.commit()
                 successful_sources += 1
-                stored.extend(store_news(entries, connection))
-            except requests.RequestException as error:
-                print(f"{source} error: {error}")
+                record_collection_run("news", source, True, items=len(entries), path=path)
+            except (requests.RequestException, RuntimeError, ValueError, sqlite3.Error) as error:
+                message = f"{source}: {error}"
+                print(f"{message}")
+                connection.rollback()
+                record_collection_run("news", source, False, error=message, path=path)
         if not successful_sources:
             raise RuntimeError("Failed to fetch AI news from every configured source")
         connection.commit()
@@ -190,23 +230,12 @@ def fetch_news(path=DB_PATH):
 
 
 def send_news_alerts(items, path=DB_PATH):
-    token = os.getenv("BOT_TOKEN")
-    chat_id = os.getenv("CHAT_ID")
-    if not token or not chat_id:
-        missing = [
-            name for name, value in (("BOT_TOKEN", token), ("CHAT_ID", chat_id)) if not value
-        ]
-        raise RuntimeError(
-            "Missing Telegram configuration: "
-            + ", ".join(missing)
-            + ". Set these in the repository .env file or GitHub Actions secrets."
-        )
     connection = sqlite3.connect(path)
     try:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=36)).isoformat()
         pending = connection.execute(
             """
-            SELECT id, url, title, source, summary, published_at
+            SELECT id, url, title, source, summary, published_at, category
             FROM news
             WHERE digest_sent_at IS NULL AND created_at >= ?
             ORDER BY importance DESC, published_at DESC
@@ -222,11 +251,15 @@ def send_news_alerts(items, path=DB_PATH):
                 "source": row[3],
                 "summary": row[4] or "",
                 "published": row[5] or "",
+                "category": row[6] or "AI industry",
             }
             for row in pending
         ]
 
-        lines = [f"🧠 DAILY AI / ML NEWS — {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"]
+        lines = [
+            f"🧠 DAILY AI / ML NEWS — "
+            f"{datetime.now(INDIA_TIMEZONE).strftime('%Y-%m-%d')}"
+        ]
         included_ids = []
         if digest_items:
             for index, item in enumerate(digest_items, start=1):
@@ -237,6 +270,7 @@ def send_news_alerts(items, path=DB_PATH):
                 story = (
                     f"\n\n{index}. {item['title']}\n"
                     f"{item['source']} • {published}\n"
+                    f"Topic: {item['category']}\n"
                     f"{summary}\n"
                     f"🔗 {item['url']}"
                 )
@@ -245,20 +279,9 @@ def send_news_alerts(items, path=DB_PATH):
                 lines.append(story)
                 included_ids.append(item["id"])
         else:
-            lines.append("\n\nNo new relevant AI news was found in today's source checks.")
+            return 0
 
-        response = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            data={"chat_id": chat_id, "text": "".join(lines)},
-            timeout=15,
-            verify=certifi.where(),
-        )
-        response.raise_for_status()
-        result = response.json()
-        if not result.get("ok"):
-            raise RuntimeError(
-                f"Telegram rejected the daily news digest: {result.get('description', 'Unknown error')}"
-            )
+        send_telegram_message("".join(lines))
 
         if included_ids:
             placeholders = ",".join("?" for _ in included_ids)

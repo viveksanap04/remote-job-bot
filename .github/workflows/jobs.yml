@@ -6,11 +6,14 @@ on:
 
   schedule:
     - cron: "0 * * * *"
-    - cron: "30 15 * * *"
+    - cron: "30 18 * * *"
 
 permissions:
   contents: write
 
+concurrency:
+  group: remote-job-bot-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
 
@@ -22,6 +25,8 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -44,14 +49,26 @@ jobs:
         run: |
           python jobs.py
 
+      - name: Classify India job listings
+        if: always()
+        run: python india_jobs.py
+
       - name: Collect AI news
-        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '30 15 * * *'
+        if: always() && (github.event_name == 'workflow_dispatch' || github.event.schedule == '30 18 * * *')
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python news_engine.py
 
+      - name: Send daily skill-market report
+        if: always() && (github.event_name == 'workflow_dispatch' || github.event.schedule == '30 18 * * *')
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python skill_intelligence.py
+
       - name: Save sent jobs
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
