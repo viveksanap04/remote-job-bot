@@ -15,7 +15,7 @@ Endpoint checks below were performed on 2026-10-29. They confirm that the public
 | Working Nomads | Not integrated | The probed RSS URL returned HTTP 404; no replacement feed/API was verified |
 | Remote.co | Not integrated | The public feed probe timed out; no stable public API/feed was verified |
 
-Jobs are persisted for AI/ML roles even when experience, remote status, or India eligibility is unknown. A primary alert is sent only for fresher/graduate/junior roles with a fully remote signal and explicit India eligibility. Unknown values remain unknown. The global sources are not a source of India onsite/hybrid postings.
+Jobs are persisted for AI/ML roles even when experience, remote status, or India eligibility is unknown. An alert is sent only for fresher/graduate/junior roles with a fully remote signal and explicit India eligibility. Unknown values remain unknown; onsite, hybrid, restricted, and unconfirmed listings are not sent as primary remote alerts. The global sources are not a source of India onsite/hybrid postings.
 
 ## India job sources
 

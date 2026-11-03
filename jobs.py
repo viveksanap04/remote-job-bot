@@ -52,10 +52,6 @@ AI_ROLE_PATTERN = re.compile(
     r"prompt engineer|ai trainer)\b",
     re.IGNORECASE,
 )
-SENIOR_ROLE_PATTERN = re.compile(
-    r"\b(?:senior|lead|principal|staff|director|manager|head of)\b",
-    re.IGNORECASE,
-)
 FRESHER_ROLE_PATTERN = re.compile(
     r"\b(?:fresher|graduate|new grad|entry[- ]level|intern)\b",
     re.IGNORECASE,
@@ -494,7 +490,7 @@ def append_sent_job(job_url):
 
 
 def build_alert(job, analysis, application_url):
-    return f"""🚀 NEW FRESHER AI/ML JOB
+    return f"""🚀 NEW ELIGIBLE FRESHER/JUNIOR AI/ML JOB
 
 💼 Role: {job["title"]}
 🏢 Company: {job.get("company") or "Not specified"}
@@ -514,10 +510,6 @@ def process_job(job, source, sent_urls, path=DB_PATH):
     title = job["title"]
     if not is_ai_role(title):
         return False, False
-    senior_role = bool(
-        SENIOR_ROLE_PATTERN.search(title)
-        or SENIOR_ROLE_PATTERN.search(job.get("seniority", ""))
-    )
 
     link = normalize_url(job.get("link", ""))
     if not link:
@@ -530,16 +522,13 @@ def process_job(job, source, sent_urls, path=DB_PATH):
         job.get("location_restrictions", ""),
     )
     india_eligible = india_status == "eligible"
-    experience_group = (
-        "experienced"
-        if senior_role
-        else job_experience_group(title, job["summary"], job.get("seniority", ""))
+    experience_group = job_experience_group(
+        title, job["summary"], job.get("seniority", "")
     )
     eligible_for_alert = (
-        not senior_role
-        and experience_group in {"fresher", "junior"}
+        experience_group in {"fresher", "junior"}
         and remote_status == "fully_remote"
-        and india_eligible
+        and india_status == "eligible"
     )
     analysis = score_job(
         title,
@@ -576,11 +565,7 @@ def process_job(job, source, sent_urls, path=DB_PATH):
     application_url = get_application_link(link)
     job_record["application_link"] = application_url
     save_job(job_record, path)
-    try:
-        send_telegram_message(build_alert(job_record, analysis, application_url))
-    except RuntimeError as error:
-        print(f"Telegram job alert failed for {title}: {error}")
-        return is_new, False
+    send_telegram_message(build_alert(job_record, analysis, application_url))
 
     mark_job_alerted(analysis["dedupe_key"], path)
     append_sent_job(link)
@@ -659,3 +644,5 @@ if __name__ == "__main__":
         f'{result["sources_checked"]} sources checked; '
         f'{len(result["issues"])} collection/processing issues'
     )
+    if result["issues"]:
+        raise SystemExit(1)

@@ -36,6 +36,9 @@ jobs:
       - name: Install packages
         run: pip install -r requirements.txt
 
+      - name: Run test suite
+        run: python -m unittest discover -v
+
       - name: Create sent_jobs.json
         run: |
           if [ ! -f sent_jobs.json ]; then

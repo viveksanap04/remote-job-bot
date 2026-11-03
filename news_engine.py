@@ -123,11 +123,24 @@ def parse_anthropic_page(response):
         title = normalize_text(article.get_text(" ", strip=True))
         url = normalize_url(urljoin(response.url, article.get("href", "")))
         if title and url:
+            card = article.find_parent("article") or article.parent
+            summary_element = card.find("p") if card else None
+            date_element = card.find("time") if card else None
+            summary = (
+                normalize_text(summary_element.get_text(" ", strip=True))
+                if summary_element
+                else title
+            )
+            published = ""
+            if date_element:
+                published = normalize_text(
+                    date_element.get("datetime") or date_element.get_text(" ", strip=True)
+                )
             entries.append({
                 "url": url,
                 "title": title,
-                "summary": title,
-                "published": "",
+                "summary": summary,
+                "published": published,
                 "source": "Anthropic",
             })
     if not entries:

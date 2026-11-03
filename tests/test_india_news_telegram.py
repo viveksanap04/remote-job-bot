@@ -2,12 +2,13 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from career_engine import initialize_database, record_collection_run, save_job
+from career_engine import INDIA_TIMEZONE, initialize_database, record_collection_run, save_job
 from india_jobs import SOURCE_STATUS, run_india_job_engine
-from news_engine import ensure_news_columns, fetch_news, store_news
+from news_engine import ensure_news_columns, fetch_news, parse_anthropic_page, store_news
 from skill_intelligence import generate_daily_report
 from telegram_utils import send_telegram_message
 
@@ -79,6 +80,23 @@ class IndiaNewsTelegramTests(unittest.TestCase):
             finally:
                 connection.close()
 
+    def test_anthropic_parser_extracts_available_summary_and_publication_date(self):
+        response = Mock(
+            url="https://www.anthropic.com/news",
+            text=(
+                '<article><a href="/news/model-release">Model release</a>'
+                "<p>A short announcement about the model.</p>"
+                '<time datetime="2026-11-03">Nov 3, 2026</time></article>'
+            ),
+        )
+
+        items = parse_anthropic_page(response)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["summary"], "A short announcement about the model.")
+        self.assertEqual(items[0]["published"], "2026-11-03")
+        self.assertEqual(items[0]["url"], "https://www.anthropic.com/news/model-release")
+
     @patch(
         "news_engine.NEWS_SOURCES",
         (
@@ -127,7 +145,8 @@ class IndiaNewsTelegramTests(unittest.TestCase):
             path = str(Path(directory) / "career.db")
             initialize_database(path)
             record_collection_run("jobs", "Remote OK", True, items=0, path=path)
-            result = generate_daily_report(path=path, report_date="2026-10-29", send=False)
+            report_date = datetime.now(INDIA_TIMEZONE).date().isoformat()
+            result = generate_daily_report(path=path, report_date=report_date, send=False)
         self.assertIn("1/6 configured global job sources succeeded", result["message"])
         self.assertIn("Collection issues:", result["message"])
 
@@ -192,7 +211,10 @@ class IndiaNewsTelegramTests(unittest.TestCase):
                 skill_result = generate_daily_report(path=path, send=True)
 
             self.assertEqual(job_result["new_eligible"], 1)
-            self.assertIn("NEW FRESHER AI/ML JOB", job_messages.call_args.args[0])
+            self.assertIn(
+                "NEW ELIGIBLE FRESHER/JUNIOR AI/ML JOB",
+                job_messages.call_args.args[0],
+            )
             self.assertIn("DAILY AI / ML NEWS", news_messages.call_args.args[0])
             self.assertIn("DAILY AI/ML SKILL INTELLIGENCE", skill_messages.call_args.args[0])
             self.assertIn("message", skill_result)

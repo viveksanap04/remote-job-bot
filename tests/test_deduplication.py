@@ -227,6 +227,71 @@ class JobDeduplicationTests(unittest.TestCase):
                 connection.close()
             self.assertEqual(row[:5], ("fully_remote", "eligible", "junior", "Unverified", 0))
             self.assertIsNotNone(row[5])
+            self.assertIn(
+                "NEW ELIGIBLE FRESHER/JUNIOR AI/ML JOB",
+                send_message.call_args.args[0],
+            )
+
+    @patch("jobs.append_sent_job")
+    @patch("jobs.get_application_link")
+    @patch("jobs.send_telegram_message", return_value={"ok": True})
+    def test_alert_requires_fresher_remote_and_explicit_india_eligibility(
+        self,
+        send_message,
+        _application_link,
+        _append_sent_job,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "career.db")
+            unknown_india_job = {
+                **build_job("Remotive", "https://example.com/unknown-india"),
+                "title": "Junior AI Engineer",
+                "summary": "Junior role. Remote. Python and PyTorch.",
+                "location": "Remote",
+                "remote": True,
+            }
+            self.assertEqual(
+                process_job(unknown_india_job, "Remotive", set(), path),
+                (True, False),
+            )
+
+            unknown_experience_job = {
+                **build_job("Remotive", "https://example.com/unknown-experience"),
+                "title": "AI Engineer",
+                "summary": "Remote worldwide. Python and PyTorch.",
+                "location": "Worldwide",
+                "remote": True,
+            }
+            self.assertEqual(
+                process_job(unknown_experience_job, "Remotive", set(), path),
+                (True, False),
+            )
+
+            experienced_job = {
+                **build_job("Remotive", "https://example.com/experienced"),
+                "title": "ML Engineer",
+                "summary": "3+ years experience. Remote worldwide. Python and PyTorch.",
+                "location": "Worldwide",
+                "remote": True,
+            }
+            self.assertEqual(
+                process_job(experienced_job, "Remotive", set(), path),
+                (True, False),
+            )
+
+            restricted_job = {
+                **build_job("Remotive", "https://example.com/us-only"),
+                "title": "Junior ML Engineer",
+                "summary": "0-2 years experience. Remote role. US only. Python and PyTorch.",
+                "location": "Remote, US only",
+                "remote": True,
+            }
+            self.assertEqual(
+                process_job(restricted_job, "Remotive", set(), path),
+                (True, False),
+            )
+            send_message.assert_not_called()
+            _application_link.assert_not_called()
 
     @patch("jobs.load_sent_jobs", return_value=set())
     @patch("jobs.fetch_source_jobs", side_effect=[RuntimeError("source unavailable"), []])
@@ -254,6 +319,51 @@ class JobDeduplicationTests(unittest.TestCase):
         self.assertEqual(result["sources_checked"], 1)
         self.assertEqual(len(result["issues"]), 1)
         self.assertEqual(statuses, [("Available source", 1), ("Failed source", 0)])
+
+    @patch("jobs.load_sent_jobs", return_value=set())
+    @patch(
+        "jobs.fetch_source_jobs",
+        return_value=[
+            {
+                "title": "Graduate AI Engineer",
+                "company": "Example AI",
+                "summary": "Graduate role. Remote worldwide. Python and PyTorch.",
+                "link": "https://example.com/graduate-ai",
+                "application_link": "",
+                "location": "Worldwide",
+                "salary": "",
+                "remote": True,
+            }
+        ],
+    )
+    @patch("jobs.get_application_link", return_value="https://example.com/apply")
+    @patch("jobs.send_telegram_message", side_effect=RuntimeError("Telegram unavailable"))
+    @patch(
+        "jobs.SOURCE_SPECS",
+        (("Test source", "fake", "https://example.com/jobs"),),
+    )
+    def test_job_alert_delivery_failure_is_reported(
+        self,
+        _send_message,
+        _application_link,
+        _fetch_source,
+        _load_sent_jobs,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "career.db")
+            result = run_global_job_engine(path)
+            connection = sqlite3.connect(path)
+            try:
+                status = connection.execute(
+                    "SELECT success, error FROM collection_runs WHERE engine = 'jobs'"
+                ).fetchone()
+            finally:
+                connection.close()
+
+        self.assertEqual(result["sources_checked"], 1)
+        self.assertTrue(any("Telegram unavailable" in issue for issue in result["issues"]))
+        self.assertEqual(status[0], 0)
+        self.assertIn("Telegram unavailable", status[1])
 
 
 if __name__ == "__main__":
