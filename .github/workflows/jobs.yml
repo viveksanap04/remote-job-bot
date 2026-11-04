@@ -6,14 +6,7 @@ on:
 
   schedule:
     - cron: "0 * * * *"
-<<<<<<< Updated upstream
     - cron: "30 18 * * *"
-=======
-    - cron: "30 15 * * *"
-
-permissions:
-  contents: write
->>>>>>> Stashed changes
 
 permissions:
   contents: write
@@ -42,12 +35,9 @@ jobs:
 
       - name: Install packages
         run: pip install -r requirements.txt
-<<<<<<< Updated upstream
 
       - name: Run test suite
         run: python -m unittest discover -v
-=======
->>>>>>> Stashed changes
 
       - name: Create sent_jobs.json
         run: |
@@ -62,23 +52,17 @@ jobs:
         run: |
           python jobs.py
 
-<<<<<<< Updated upstream
       - name: Classify India job listings
         if: always()
         run: python india_jobs.py
 
       - name: Collect AI news
         if: always() && (github.event_name == 'workflow_dispatch' || github.event.schedule == '30 18 * * *')
-=======
-      - name: Collect AI news
-        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '30 15 * * *'
->>>>>>> Stashed changes
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python news_engine.py
 
-<<<<<<< Updated upstream
       - name: Send daily skill-market report
         if: always() && (github.event_name == 'workflow_dispatch' || github.event.schedule == '30 18 * * *')
         env:
@@ -86,8 +70,6 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python skill_intelligence.py
 
-=======
->>>>>>> Stashed changes
       - name: Save sent jobs
         if: always()
         run: |
