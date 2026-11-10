@@ -37,13 +37,15 @@ class JobEligibilityTests(unittest.TestCase):
         self.assertFalse(is_fully_remote("Remote AI Engineer", "This is not fully remote"))
         self.assertFalse(is_fully_remote("Remote AI Engineer", remote=False))
 
-    def test_requires_explicit_india_eligibility(self):
+    def test_worldwide_remote_does_not_imply_india_eligibility(self):
         self.assertTrue(is_india_eligible(location="India"))
         self.assertTrue(is_india_eligible(location_restrictions=["US", "India"]))
         self.assertTrue(is_india_eligible("We accept applicants from India"))
         self.assertTrue(is_india_eligible("Candidates must be based in India"))
         self.assertFalse(is_india_eligible("Our team has an office in India"))
-        self.assertTrue(is_india_eligible(location="Worldwide"))
+        self.assertFalse(is_india_eligible(location="Worldwide"))
+        self.assertFalse(is_india_eligible("You can work from anywhere"))
+        self.assertEqual(india_eligibility_status(location="Worldwide"), "unknown")
         self.assertEqual(india_eligibility_status(), "unknown")
         self.assertEqual(india_eligibility_status(location="US only"), "ineligible")
         self.assertFalse(is_india_eligible("Applicants are not eligible in India"))

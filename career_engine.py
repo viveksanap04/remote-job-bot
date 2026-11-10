@@ -346,16 +346,10 @@ def india_eligibility_status(description="", location="", location_restrictions=
     ):
         return "ineligible"
 
-    if re.search(r"\bindia\b|\bworldwide\b|\banywhere\b|\bglobal(?:ly)?\b", structured_location):
+    if re.search(r"\bindia\b", structured_location):
         return "eligible"
 
     india_acceptance_patterns = (
-        r"\b(?:work|working|hire|hiring|applicants?|candidates?)\s+"
-        r"(?:from\s+)?(?:anywhere|worldwide|anywhere in the world)\b",
-        r"\b(?:remote\s+)?(?:work|working)\s+from\s+anywhere\b",
-        r"\b(?:applicants?|candidates?)\s+(?:can|may)\s+be\s+"
-        r"(?:based\s+)?(?:anywhere|worldwide)\b",
-        r"\bopen to (?:applicants?|candidates?)\s+(?:anywhere|worldwide)\b",
         r"\b(?:based|located|residing|living)\s+in\s+india\b",
         r"\bwork(?:ing)?\s+from\s+india\b",
         r"\bindia[- ]based\b",
@@ -490,7 +484,6 @@ def initialize_database(path=DB_PATH):
                 remote_status TEXT NOT NULL DEFAULT 'unknown',
                 india_eligibility TEXT NOT NULL DEFAULT 'unknown',
                 employment_category TEXT NOT NULL DEFAULT 'unknown',
-                snapshot_version INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (job_id, observed_date),
                 FOREIGN KEY(job_id) REFERENCES jobs(id)
             );
@@ -527,21 +520,6 @@ def initialize_database(path=DB_PATH):
                 started_at TEXT NOT NULL,
                 completed_at TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS daily_skill_metrics (
-                report_date TEXT NOT NULL,
-                group_name TEXT NOT NULL,
-                skill TEXT NOT NULL,
-                job_count INTEGER NOT NULL,
-                unique_jobs INTEGER NOT NULL,
-                PRIMARY KEY (report_date, group_name, skill)
-            );
-            CREATE TABLE IF NOT EXISTS daily_skill_combinations (
-                report_date TEXT NOT NULL,
-                group_name TEXT NOT NULL,
-                skill_pair TEXT NOT NULL,
-                job_count INTEGER NOT NULL,
-                PRIMARY KEY (report_date, group_name, skill_pair)
-            );
             CREATE TABLE IF NOT EXISTS daily_reports (
                 report_date TEXT NOT NULL,
                 report_type TEXT NOT NULL,
@@ -550,6 +528,8 @@ def initialize_database(path=DB_PATH):
             );
             """
         )
+        connection.execute("DROP TABLE IF EXISTS daily_skill_metrics")
+        connection.execute("DROP TABLE IF EXISTS daily_skill_combinations")
         job_columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
         job_migrations = {
             "closing_at": "TEXT",
@@ -574,13 +554,16 @@ def initialize_database(path=DB_PATH):
             "remote_status": "TEXT NOT NULL DEFAULT 'unknown'",
             "india_eligibility": "TEXT NOT NULL DEFAULT 'unknown'",
             "employment_category": "TEXT NOT NULL DEFAULT 'unknown'",
-            "snapshot_version": "INTEGER NOT NULL DEFAULT 0",
         }
         for column, definition in observation_migrations.items():
             if column not in observation_columns:
                 connection.execute(
                     f"ALTER TABLE job_observations ADD COLUMN {column} {definition}"
                 )
+        if "snapshot_version" in observation_columns:
+            connection.execute(
+                "ALTER TABLE job_observations DROP COLUMN snapshot_version"
+            )
         news_columns = {row[1] for row in connection.execute("PRAGMA table_info(news)")}
         if "content_hash" not in news_columns:
             connection.execute("ALTER TABLE news ADD COLUMN content_hash TEXT")
@@ -588,6 +571,8 @@ def initialize_database(path=DB_PATH):
             connection.execute("ALTER TABLE news ADD COLUMN digest_sent_at TEXT")
         if "category" not in news_columns:
             connection.execute("ALTER TABLE news ADD COLUMN category TEXT")
+        if "notified_at" not in news_columns:
+            connection.execute("ALTER TABLE news ADD COLUMN notified_at TEXT")
         connection.commit()
     finally:
         connection.close()
@@ -725,15 +710,14 @@ def save_job(job, path=DB_PATH):
             """
             INSERT INTO job_observations
             (job_id, observed_date, is_new, skills, experience_group, remote_status,
-             india_eligibility, employment_category, snapshot_version)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+             india_eligibility, employment_category)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(job_id, observed_date) DO UPDATE SET
               skills=excluded.skills,
               experience_group=excluded.experience_group,
               remote_status=excluded.remote_status,
               india_eligibility=excluded.india_eligibility,
-              employment_category=excluded.employment_category,
-              snapshot_version=excluded.snapshot_version
+              employment_category=excluded.employment_category
             """,
             (
                 job_id,

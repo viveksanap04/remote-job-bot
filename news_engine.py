@@ -3,6 +3,7 @@ import re
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin
 
 import certifi
@@ -30,7 +31,6 @@ NEWS_SOURCES = (
     ("Microsoft Research", "rss", "https://www.microsoft.com/en-us/research/feed/"),
     ("Google Research", "rss", "https://research.google/blog/rss/"),
     ("AWS Machine Learning", "rss", "https://aws.amazon.com/blogs/machine-learning/feed/"),
-    ("MIT Technology Review AI", "rss", "https://www.technologyreview.com/topic/artificial-intelligence/feed/"),
     ("arXiv CS.AI", "rss", "https://export.arxiv.org/rss/cs.AI"),
     ("arXiv ML", "rss", "https://export.arxiv.org/rss/cs.LG"),
     ("arXiv Computer Vision", "rss", "https://export.arxiv.org/rss/cs.CV"),
@@ -39,15 +39,19 @@ NEWS_SOURCES = (
 
 IMPORTANT_TERMS = (
     "launch", "release", "model", "funding", "research", "open source",
-    "acquisition", "breakthrough", "safety", "agent",
+    "breakthrough", "safety", "agent", "inference", "rag", "multimodal",
 )
 NEWS_TOPIC_PATTERN = re.compile(
-    r"\b(?:ai|ml|llm|agentic|agents?|genai|transformer|multimodal)\b"
+    r"\b(?:ai|ml|llm|agentic|agents?|genai|transformer|multimodal|rag|mlops|"
+    r"inference|computer vision|nlp)\b"
     r"|artificial intelligence|machine learning|deep learning|large language model"
-    r"|computer vision|vision-language|neural network|generative ai|robotics",
+    r"|computer vision|vision-language|neural network|generative ai|robotics|"
+    r"retrieval[- ]augmented generation|natural language processing|"
+    r"model serving|ai infrastructure|ai deployment",
     re.IGNORECASE,
 )
 STOP_WORDS = {"about", "after", "and", "from", "into", "that", "the", "this", "with", "your"}
+IMPORTANT_NEWS_THRESHOLD = 44
 
 
 def importance_score(title, summary):
@@ -58,15 +62,20 @@ def importance_score(title, summary):
 def topic_category(title, summary):
     text = f"{title} {summary}".lower()
     categories = (
-        ("Models and releases", ("model", "release", "launch")),
-        ("Research", ("research", "paper", "study", "arxiv")),
-        ("AI safety and policy", ("safety", "policy", "alignment", "governance")),
-        ("Developer tools and infrastructure", ("developer", "tool", "infrastructure", "open source")),
-        ("Agents and applications", ("agent", "application", "product")),
+        (
+            "New Model Release",
+            ("model release", "new model", "model launch", "introduces", "announces model"),
+        ),
+        ("Agentic AI Developments", ("agentic", "ai agent", "agents")),
+        ("LLM and RAG Updates", ("llm", "large language model", "rag", "retrieval-augmented")),
+        ("Open-Source AI Tools", ("open source", "open-source", "hugging face", "framework")),
+        ("Computer Vision and Deep Learning", ("computer vision", "deep learning", "vision model")),
+        ("Research Breakthrough", ("research", "paper", "study", "arxiv", "breakthrough")),
+        ("AI Industry and Company Announcements", ("funding", "partnership", "acquisition", "company")),
     )
     return next(
         (category for category, terms in categories if any(term in text for term in terms)),
-        "AI industry",
+        "Breaking AI News",
     )
 
 
@@ -97,6 +106,8 @@ def ensure_news_columns(connection):
         connection.execute("ALTER TABLE news ADD COLUMN digest_sent_at TEXT")
     if "category" not in columns:
         connection.execute("ALTER TABLE news ADD COLUMN category TEXT")
+    if "notified_at" not in columns:
+        connection.execute("ALTER TABLE news ADD COLUMN notified_at TEXT")
 
 
 def parse_feed(source, response):
@@ -129,7 +140,7 @@ def parse_anthropic_page(response):
             summary = (
                 normalize_text(summary_element.get_text(" ", strip=True))
                 if summary_element
-                else title
+                else ""
             )
             published = ""
             if date_element:
@@ -175,19 +186,10 @@ def store_news(entries, connection):
         title = normalize_text(entry["title"])
         summary = normalize_text(entry["summary"])
         source = entry.get("source", "")
-        curated_ai_source = source in {"OpenAI", "Google DeepMind", "Anthropic", "Hugging Face"}
-        if (
-            not url
-            or not title
-            or not (
-                curated_ai_source
-                or NEWS_TOPIC_PATTERN.search(f"{title} {summary}")
-                or (
-                    source.startswith("arXiv")
-                    and NEWS_TOPIC_PATTERN.search(f"{title} {summary} {source}")
-                )
-            )
-        ):
+        topic_text = f"{title} {summary}"
+        if source.startswith("arXiv"):
+            topic_text += f" {source}"
+        if not url or not title or not NEWS_TOPIC_PATTERN.search(topic_text):
             continue
         if any(url == row[0] or is_same_story(title, summary, row[1], row[2]) for row in existing):
             continue
@@ -210,14 +212,24 @@ def store_news(entries, connection):
             ),
         )
         existing.append((url, title, summary))
-        stored.append({**entry, "url": url, "title": title, "summary": summary})
+        stored.append(
+            {
+                **entry,
+                "id": connection.execute("SELECT last_insert_rowid()").fetchone()[0],
+                "url": url,
+                "title": title,
+                "summary": summary,
+                "category": topic_category(title, summary),
+            }
+        )
     return stored
 
 
-def fetch_news(path=DB_PATH):
+def fetch_news(path=DB_PATH, return_status=False):
     initialize_database(path)
     stored = []
     successful_sources = 0
+    issues = []
     connection = sqlite3.connect(path)
     try:
         ensure_news_columns(connection)
@@ -229,9 +241,14 @@ def fetch_news(path=DB_PATH):
                 connection.commit()
                 successful_sources += 1
                 record_collection_run("news", source, True, items=len(entries), path=path)
+                print(
+                    f"{source}: collected {len(entries)} entries, "
+                    f"{len(new_entries)} new AI/ML articles"
+                )
             except (requests.RequestException, RuntimeError, ValueError, sqlite3.Error) as error:
                 message = f"{source}: {error}"
                 print(f"{message}")
+                issues.append(message)
                 connection.rollback()
                 record_collection_run("news", source, False, error=message, path=path)
         if not successful_sources:
@@ -239,76 +256,219 @@ def fetch_news(path=DB_PATH):
         connection.commit()
     finally:
         connection.close()
+    if return_status:
+        return stored, successful_sources, issues
     return stored
 
 
 def send_news_alerts(items, path=DB_PATH):
     connection = sqlite3.connect(path)
     try:
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=36)).isoformat()
+        candidate_ids = [item["id"] for item in items if item.get("id")]
+        if not candidate_ids:
+            return 0
+        placeholders = ",".join("?" for _ in candidate_ids)
         pending = connection.execute(
-            """
+            f"""
             SELECT id, url, title, source, summary, published_at, category
             FROM news
-            WHERE digest_sent_at IS NULL AND created_at >= ?
-            ORDER BY importance DESC, published_at DESC
-            LIMIT 8
+            WHERE id IN ({placeholders})
+              AND importance >= ?
+              AND notified_at IS NULL
+            ORDER BY importance DESC, created_at DESC
+            LIMIT 5
             """,
-            (cutoff,),
+            (*candidate_ids, IMPORTANT_NEWS_THRESHOLD),
         ).fetchall()
-        digest_items = [
-            {
-                "id": row[0],
-                "url": row[1],
-                "title": row[2],
-                "source": row[3],
-                "summary": row[4] or "",
-                "published": row[5] or "",
-                "category": row[6] or "AI industry",
-            }
-            for row in pending
-        ]
-
-        lines = [
-            f"🧠 DAILY AI / ML NEWS — "
-            f"{datetime.now(INDIA_TIMEZONE).strftime('%Y-%m-%d')}"
-        ]
-        included_ids = []
-        if digest_items:
-            for index, item in enumerate(digest_items, start=1):
-                published = normalize_text(item["published"]) or "Date not provided"
-                summary = normalize_text(BeautifulSoup(item["summary"], "html.parser").get_text(" ", strip=True))
-                if len(summary) > 220:
-                    summary = summary[:217].rsplit(" ", 1)[0] + "..."
-                story = (
-                    f"\n\n{index}. {item['title']}\n"
-                    f"{item['source']} • {published}\n"
-                    f"Topic: {item['category']}\n"
-                    f"{summary}\n"
-                    f"🔗 {item['url']}"
-                )
-                if sum(map(len, lines)) + len(story) > 3800:
-                    break
-                lines.append(story)
-                included_ids.append(item["id"])
-        else:
+        pending = [row for row in pending if is_recent_publication(row[5])]
+        if not pending:
             return 0
 
-        send_telegram_message("".join(lines))
-
-        if included_ids:
-            placeholders = ",".join("?" for _ in included_ids)
-            connection.execute(
-                f"UPDATE news SET digest_sent_at = ? WHERE id IN ({placeholders})",
-                (datetime.now(timezone.utc).isoformat(), *included_ids),
+        lines = ["🚨 IMPORTANT AI/ML UPDATES"]
+        included = []
+        for index, row in enumerate(pending, start=1):
+            summary = clean_summary(row[4])
+            update = (
+                f"\n\n{index}. {row[2]}\n{row[3]} · {format_news_date(row[5])}"
+                f"\n{summary or 'Publisher did not provide a summary.'}"
+                f"\nTopic: {row[6] or 'Breaking AI News'}\n🔗 {row[1]}"
             )
-            connection.commit()
-        return 1
+            if sum(map(len, lines)) + len(update) > 3800:
+                break
+            lines.append(update)
+            included.append(row)
+        if not included:
+            return 0
+        send_telegram_message("\n".join(lines))
+        connection.execute("BEGIN")
+        connection.executemany(
+            "UPDATE news SET notified_at = ? WHERE id = ? AND notified_at IS NULL",
+            [(datetime.now(timezone.utc).isoformat(), row[0]) for row in included],
+        )
+        connection.commit()
+        return len(included)
     finally:
         connection.close()
 
 
+def clean_summary(value):
+    return normalize_text(BeautifulSoup(value or "", "html.parser").get_text(" ", strip=True))
+
+
+def format_news_date(value):
+    if not value:
+        return "Date not provided"
+    try:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            parsed = parsedate_to_datetime(str(value))
+        return parsed.strftime("%Y-%m-%d")
+    except (TypeError, ValueError, OverflowError):
+        return normalize_text(value)
+
+
+def is_recent_publication(value, days=14):
+    if not value:
+        return True
+    try:
+        try:
+            published = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            published = parsedate_to_datetime(str(value))
+        if published.tzinfo is None:
+            published = published.replace(tzinfo=timezone.utc)
+        return published >= datetime.now(timezone.utc) - timedelta(days=days)
+    except (TypeError, ValueError, OverflowError):
+        return True
+
+
+def why_it_matters(category):
+    implications = {
+        "New Model Release": "Useful for comparing newly announced model capabilities.",
+        "Research Breakthrough": "Adds new research evidence or methods to follow.",
+        "Agentic AI Developments": "Relevant to teams building or evaluating AI-agent workflows.",
+        "LLM and RAG Updates": "Relevant to teams building language-model and retrieval systems.",
+        "Open-Source AI Tools": "May change the tools available to build or run AI systems.",
+        "Computer Vision and Deep Learning": "Relevant to teams tracking vision and deep-learning methods.",
+        "AI Industry and Company Announcements": "Signals a change in the AI industry or company landscape.",
+        "Breaking AI News": "A timely development in AI/ML worth monitoring.",
+    }
+    return implications.get(category, implications["Breaking AI News"])
+
+
+def send_daily_news_report(path=DB_PATH, report_date=None):
+    initialize_database(path)
+    report_date = report_date or datetime.now(INDIA_TIMEZONE).date().isoformat()
+    connection = sqlite3.connect(path, timeout=30)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        already_sent = connection.execute(
+            "SELECT 1 FROM daily_reports WHERE report_date = ? AND report_type = 'news'",
+            (report_date,),
+        ).fetchone()
+        if already_sent:
+            connection.rollback()
+            return {"already_sent": True, "items": 0}
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=36)).isoformat()
+        rows = connection.execute(
+            """
+            SELECT url, title, source, summary, published_at, category
+            FROM news
+            WHERE created_at >= ? AND digest_sent_at IS NULL
+            ORDER BY importance DESC, created_at DESC
+            LIMIT 200
+            """,
+            (cutoff,),
+        ).fetchall()
+        rows = [row for row in rows if is_recent_publication(row[4])][:10]
+        lines = [f"🧠 DAILY AI/ML TRENDING REPORT — {report_date}"]
+        included_urls = []
+        if rows:
+            lines.append(f"Top {len(rows)} recent, source-verified developments:")
+            for index, row in enumerate(rows, start=1):
+                category = row[5] or "Breaking AI News"
+                summary = clean_summary(row[3])
+                research_type = (
+                    "Research paper"
+                    if (row[2] or "").startswith("arXiv")
+                    else "Announcement / article"
+                )
+                story = (
+                    f"\n\n{index}. {row[1]}\nPublisher: {row[2] or 'Not specified'}"
+                    f" · Published: {format_news_date(row[4])}"
+                    f"\nType: {research_type}\nTopic: {category}"
+                    f"\nWhat happened: {summary or 'Publisher did not provide a summary.'}"
+                    f"\nWhy it matters: {why_it_matters(category)}\n🔗 {row[0]}"
+                )
+                if sum(map(len, lines)) + len(story) > 3800:
+                    break
+                lines.append(story)
+                included_urls.append(row[0])
+        else:
+            lines.append("No new AI/ML developments were collected in the reporting window.")
+
+        send_telegram_message("\n".join(lines))
+        connection.execute(
+            """
+            INSERT INTO daily_reports (report_date, report_type, sent_at)
+            VALUES (?, 'news', ?)
+            """,
+            (report_date, datetime.now(timezone.utc).isoformat()),
+        )
+        if included_urls:
+            placeholders = ",".join("?" for _ in included_urls)
+            connection.execute(
+                f"UPDATE news SET digest_sent_at = ? WHERE url IN ({placeholders})",
+                (datetime.now(timezone.utc).isoformat(), *included_urls),
+            )
+        connection.commit()
+        return {"already_sent": False, "items": len(included_urls)}
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def run_news_engine(path=DB_PATH, daily_report=False):
+    items, sources_checked, issues = fetch_news(path, return_status=True)
+    try:
+        alerts = send_news_alerts(items, path)
+        print(
+            f"News engine: {sources_checked} sources succeeded; "
+            f"collected {len(items)} new articles; sent {alerts} important update(s)"
+        )
+    except (requests.RequestException, RuntimeError, sqlite3.Error) as error:
+        alerts = 0
+        issues.append(f"Important-news notification failed: {error}")
+        print(issues[-1])
+
+    report = None
+    if daily_report:
+        try:
+            report = send_daily_news_report(path)
+            print(
+                "Daily AI/ML report: "
+                + ("already sent" if report["already_sent"] else f'sent with {report["items"]} article(s)')
+            )
+        except (requests.RequestException, RuntimeError, sqlite3.Error, ValueError) as error:
+            issues.append(f"Daily AI/ML report failed: {error}")
+            print(issues[-1])
+    return {
+        "new_articles": len(items),
+        "sources_checked": sources_checked,
+        "important_alerts": alerts,
+        "daily_report": report,
+        "issues": issues,
+    }
+
+
 if __name__ == "__main__":
-    new_items = fetch_news()
-    print(f"Stored {len(new_items)} new AI news items")
-    print(f"Sent {send_news_alerts(new_items)} daily AI news digest")
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--daily-report", action="store_true")
+    arguments = parser.parse_args()
+    run_news_engine(daily_report=arguments.daily_report)

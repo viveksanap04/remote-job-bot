@@ -13,13 +13,6 @@ from career_engine import (
     save_job,
 )
 from jobs import process_job, run_global_job_engine
-from skill_intelligence import (
-    EXPECTED_JOB_SOURCES,
-    _coverage_is_complete,
-    _load_jobs_for_date,
-    _latest_source_results,
-    _period_metrics,
-)
 
 
 def build_job(source, url):
@@ -123,7 +116,7 @@ class JobDeduplicationTests(unittest.TestCase):
             finally:
                 connection.close()
 
-    def test_historical_metrics_use_immutable_observation_snapshots(self):
+    def test_historical_job_observations_use_immutable_snapshots(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "career.db")
             initialize_database(path)
@@ -146,50 +139,14 @@ class JobDeduplicationTests(unittest.TestCase):
                 )
                 connection.commit()
 
-                historical_job = _load_jobs_for_date(connection, observed_date)[0]
-                self.assertEqual(historical_job["skills"], "Python, PyTorch")
-                self.assertEqual(historical_job["experience_group"], "fresher")
-                self.assertEqual(historical_job["remote_status"], "fully_remote")
-                self.assertEqual(historical_job["india_eligibility"], "eligible")
-
-                source_results = {
-                    observed_date: {
-                        source: {"success": True, "error": ""}
-                        for source in EXPECTED_JOB_SOURCES
-                    }
-                }
-                metrics = _period_metrics(
-                    connection,
-                    observed_date,
-                    [0],
-                    "fresher",
-                    source_results,
-                )
-                self.assertEqual(metrics["unique_jobs"], 1)
-                self.assertEqual(metrics["skills"]["Python"], 1)
-                self.assertNotIn("SQL", metrics["skills"])
-            finally:
-                connection.close()
-
-    def test_legacy_observations_do_not_qualify_for_trend_comparisons(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = str(Path(directory) / "career.db")
-            initialize_database(path)
-            save_job(build_job("Remote OK", "https://example.com/job"), path)
-            for source in EXPECTED_JOB_SOURCES:
-                record_collection_run("jobs", source, True, path=path)
-
-            connection = sqlite3.connect(path)
-            try:
-                observed_date = connection.execute(
-                    "SELECT observed_date FROM job_observations"
-                ).fetchone()[0]
-                connection.execute(
-                    "UPDATE job_observations SET snapshot_version = 0"
-                )
-                connection.commit()
-                source_results = _latest_source_results(connection, observed_date)
-                self.assertFalse(_coverage_is_complete(source_results, observed_date))
+                snapshot = connection.execute(
+                    """
+                    SELECT skills, experience_group, remote_status, india_eligibility
+                    FROM job_observations WHERE observed_date = ?
+                    """,
+                    (observed_date,),
+                ).fetchone()
+                self.assertEqual(snapshot, ("Python, PyTorch", "fresher", "fully_remote", "eligible"))
             finally:
                 connection.close()
 
@@ -207,7 +164,7 @@ class JobDeduplicationTests(unittest.TestCase):
             job = {
                 **build_job("Remotive", "https://example.com/job"),
                 "summary": "Junior role. Python and PyTorch. Remote worldwide.",
-                "location": "Worldwide",
+                "location": "India",
                 "remote": True,
             }
             self.assertEqual(process_job(job, "Remotive", set(), path), (True, True))
@@ -227,15 +184,12 @@ class JobDeduplicationTests(unittest.TestCase):
                 connection.close()
             self.assertEqual(row[:5], ("fully_remote", "eligible", "junior", "Unverified", 0))
             self.assertIsNotNone(row[5])
-            self.assertIn(
-                "NEW ELIGIBLE FRESHER/JUNIOR AI/ML JOB",
-                send_message.call_args.args[0],
-            )
+            self.assertIn("NEW REMOTE AI/ML JOB", send_message.call_args.args[0])
 
     @patch("jobs.append_sent_job")
-    @patch("jobs.get_application_link")
+    @patch("jobs.get_application_link", return_value="https://example.com/apply")
     @patch("jobs.send_telegram_message", return_value={"ok": True})
-    def test_alert_requires_fresher_remote_and_explicit_india_eligibility(
+    def test_alert_includes_unknown_and_restricted_india_eligibility_but_not_experienced_roles(
         self,
         send_message,
         _application_link,
@@ -252,7 +206,7 @@ class JobDeduplicationTests(unittest.TestCase):
             }
             self.assertEqual(
                 process_job(unknown_india_job, "Remotive", set(), path),
-                (True, False),
+                (True, True),
             )
 
             unknown_experience_job = {
@@ -264,7 +218,7 @@ class JobDeduplicationTests(unittest.TestCase):
             }
             self.assertEqual(
                 process_job(unknown_experience_job, "Remotive", set(), path),
-                (True, False),
+                (True, True),
             )
 
             experienced_job = {
@@ -288,10 +242,10 @@ class JobDeduplicationTests(unittest.TestCase):
             }
             self.assertEqual(
                 process_job(restricted_job, "Remotive", set(), path),
-                (True, False),
+                (True, True),
             )
-            send_message.assert_not_called()
-            _application_link.assert_not_called()
+            self.assertEqual(send_message.call_count, 3)
+            self.assertEqual(_application_link.call_count, 3)
 
     @patch("jobs.load_sent_jobs", return_value=set())
     @patch("jobs.fetch_source_jobs", side_effect=[RuntimeError("source unavailable"), []])

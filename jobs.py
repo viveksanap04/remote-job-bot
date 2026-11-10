@@ -56,6 +56,10 @@ FRESHER_ROLE_PATTERN = re.compile(
     r"\b(?:fresher|graduate|new grad|entry[- ]level|intern)\b",
     re.IGNORECASE,
 )
+SENIOR_ROLE_PATTERN = re.compile(
+    r"\b(?:senior|sr\.?|lead|principal|staff|director|head of|manager)\b",
+    re.IGNORECASE,
+)
 
 
 def request_source(url):
@@ -393,7 +397,15 @@ def is_ai_role(title):
 def job_experience_group(title, description, seniority):
     text = " ".join((title, description, seniority))
     if not is_fresher_experience(title, description, seniority):
-        return "experienced" if re.search(r"\b\d+\+?\s*(?:years?|yrs?)\b", text, re.IGNORECASE) else "unknown"
+        exceeds_two_years = re.search(
+            r"\b(?:[3-9]|[1-9]\d*)\+?\s*(?:years?|yrs?)\b|"
+            r"\b(?:three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*"
+            r"(?:years?|yrs?)\b|\b(?:more than|over|in excess of|greater than)\s+"
+            r"(?:2|two)\s*(?:years?|yrs?)\b",
+            text,
+            re.IGNORECASE,
+        )
+        return "experienced" if exceeds_two_years else "unknown"
     if FRESHER_ROLE_PATTERN.search(text):
         return "fresher"
     return "junior"
@@ -470,6 +482,29 @@ def format_salary(job, analysis):
     )
 
 
+def work_classification(job, remote_status, india_status):
+    if remote_status == "hybrid":
+        return "India Hybrid" if india_status == "eligible" else "Hybrid"
+    if remote_status == "onsite":
+        return "India Onsite" if india_status == "eligible" else "Onsite"
+    if remote_status != "fully_remote":
+        return "Work mode unknown"
+    if india_status == "eligible":
+        return "Fully Remote — India Eligible"
+    if india_status == "ineligible":
+        return "Fully Remote — Restricted Countries"
+
+    location_text = normalize_text(
+        " ".join(
+            str(job.get(key, "") or "")
+            for key in ("location", "location_restrictions")
+        )
+    )
+    if re.search(r"\b(?:worldwide|anywhere|global(?:ly)?)\b", location_text, re.IGNORECASE):
+        return "Fully Remote — Worldwide (India eligibility unknown)"
+    return "Fully Remote — India eligibility unknown"
+
+
 def load_sent_jobs():
     if not SENT_JOBS_PATH.exists():
         return set()
@@ -490,19 +525,29 @@ def append_sent_job(job_url):
 
 
 def build_alert(job, analysis, application_url):
-    return f"""🚀 NEW ELIGIBLE FRESHER/JUNIOR AI/ML JOB
+    work = work_classification(
+        job, job["remote_status"], job["india_eligibility"]
+    )
+    location = (
+        job.get("location")
+        or job.get("location_restrictions")
+        or "Not specified"
+    )
+    return f"""🚀 NEW REMOTE AI/ML JOB
 
 💼 Role: {job["title"]}
 🏢 Company: {job.get("company") or "Not specified"}
 📡 Source: {job["source"]}
 🎯 Experience: {analysis["experience"]}
 🤖 Skills: {" • ".join(analysis["skills"]) or "Not specified"}
-🌍 Work: 100% Remote — India Eligible
-📅 Posted: {format_job_date(job.get("published"))} | ⏳ Deadline: {format_job_date(job.get("closing"))}
+🌍 Work mode: {work}
+📍 Location: {location}
+🇮🇳 India eligibility: {job["india_eligibility"].title()}
+📅 Posted: {format_job_date(job.get("published"))}
 💰 Salary: {format_salary(job, analysis)}
 ⭐ Match Score: {analysis["score"]}/100
-✅ Company Verified: Unverified
-🔗 Apply URL (not independently verified): {application_url}
+🏢 Company verification: {job.get("company_verification", "Unverified")}
+🔗 Official application URL (not independently verified): {application_url}
 """
 
 
@@ -525,10 +570,13 @@ def process_job(job, source, sent_urls, path=DB_PATH):
     experience_group = job_experience_group(
         title, job["summary"], job.get("seniority", "")
     )
+    seniority_text = " ".join(
+        (title, job.get("summary", ""), job.get("seniority", ""))
+    )
     eligible_for_alert = (
-        experience_group in {"fresher", "junior"}
+        experience_group in {"fresher", "junior", "unknown"}
+        and not SENIOR_ROLE_PATTERN.search(seniority_text)
         and remote_status == "fully_remote"
-        and india_status == "eligible"
     )
     analysis = score_job(
         title,

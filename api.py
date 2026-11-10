@@ -96,17 +96,3 @@ def update_application(application_id: int, status: str, notes: str = "", follow
     if cursor.rowcount == 0:
         raise HTTPException(status_code=404, detail="Application not found")
     return {"status": status, "application_id": application_id}
-
-
-@app.get("/skills")
-def skills():
-    rows = query("SELECT skills FROM jobs WHERE skills != ''")
-    counts = {}
-    for row in rows:
-        for skill in row["skills"].split(", "):
-            counts[skill] = counts.get(skill, 0) + 1
-    return sorted(
-        ({"skill": skill, "demand": count} for skill, count in counts.items()),
-        key=lambda item: item["demand"],
-        reverse=True,
-    )

@@ -15,7 +15,7 @@ Endpoint checks below were performed on 2026-10-29. They confirm that the public
 | Working Nomads | Not integrated | The probed RSS URL returned HTTP 404; no replacement feed/API was verified |
 | Remote.co | Not integrated | The public feed probe timed out; no stable public API/feed was verified |
 
-Jobs are persisted for AI/ML roles even when experience, remote status, or India eligibility is unknown. An alert is sent only for fresher/graduate/junior roles with a fully remote signal and explicit India eligibility. Unknown values remain unknown; onsite, hybrid, restricted, and unconfirmed listings are not sent as primary remote alerts. The global sources are not a source of India onsite/hybrid postings.
+AI/ML listings are retained when experience, remote status, or India eligibility is unknown. Alerts cover fully remote roles without a known over-two-years requirement or explicit senior title; unknown experience and India eligibility are labeled as unknown. India eligibility is evaluated separately from worldwide remote claims. Hybrid and onsite listings are classified and stored but are not sent as remote-job alerts.
 
 ## India job sources
 
@@ -23,14 +23,14 @@ Cutshort, Naukri, Wellfound, and National Career Service are not integrated. Dur
 
 These checks are endpoint smoke tests, not a review or approval of each portal's terms. `india_jobs.py` reports counts for India Remote, India Hybrid, and India Onsite records already collected by configured sources. An empty category is not evidence that no such jobs exist. Use of these portals for automated collection requires an official API/feed and review of its access terms.
 
-## AI news
+## AI/ML news and reports
 
-The existing news engine covers OpenAI, Google DeepMind, Anthropic, Hugging Face, NVIDIA, Microsoft Research, Google Research, AWS Machine Learning, MIT Technology Review AI, and arXiv AI/ML/vision/statistical-ML feeds.
+The news engine covers official feeds/pages for OpenAI, Google DeepMind, Anthropic, Hugging Face, NVIDIA, Microsoft Research, Google Research, AWS Machine Learning, and arXiv AI/ML/vision/statistical-ML feeds. MIT Technology Review was removed so the configured list matches the requested first-party and research sources.
 
-All 13 configured endpoints were fetched and parsed during the endpoint check, producing 162 new items across six assigned topic categories. News has separate URL/content deduplication and is sent in separate Telegram digests. A digest is not sent when no new relevant items are pending, and a total source failure stops the news run rather than being represented as a successful zero-item day.
+Items must match AI/ML topics before storage. URLs and similar article content are deduplicated. Important new items can trigger a Telegram update; the daily report ranks up to ten recent items and includes the publisher, source date when available, publisher-provided summary, topic, and article URL. Research-feed items are labeled as papers. A daily report is recorded once per Asia/Kolkata calendar date; empty reporting windows are stated as empty rather than filled with invented stories.
 
-## Daily skill report
+## Architecture and scheduling
 
-Job observations and source-run outcomes are recorded in `career_intelligence.db`. Skill metrics use distinct normalized company/role listings, separated into fresher, junior (up to two years), all AI/ML, India-eligible remote, India hybrid/onsite, and India-restricted groups. Trend comparisons are suppressed unless periods have complete coverage from the same configured sources and enough distinct listings.
+`main.py` is the orchestration entry point. It runs the job engine and then the news engine independently, so a failed engine does not prevent the other from running. The GitHub Actions workflow runs hourly and at 00:00 Asia/Kolkata (18:30 UTC) for the daily news report. Manual workflow dispatch also requests the daily report, with database deduplication preventing another post on the same local date.
 
-The daily report is scheduled for 00:00 Asia/Kolkata (`30 18 * * *` UTC). It requires `BOT_TOKEN` and `CHAT_ID` as GitHub Actions secrets. For local runs, place them in `.env`, which is excluded by `.gitignore`.
+The workflow uses the existing `BOT_TOKEN` and `CHAT_ID` secrets. For local runs, set them in `.env`, which is excluded by `.gitignore`, then run `python main.py`; use `python main.py --daily-report` to request the once-per-day report.

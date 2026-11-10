@@ -6,6 +6,7 @@ on:
 
   schedule:
     - cron: "0 * * * *"
+    # 00:00 Asia/Kolkata daily report (18:30 UTC).
     - cron: "30 18 * * *"
 
 permissions:
@@ -50,25 +51,11 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: |
-          python jobs.py
-
-      - name: Classify India job listings
-        if: always()
-        run: python india_jobs.py
-
-      - name: Collect AI news
-        if: always() && (github.event_name == 'workflow_dispatch' || github.event.schedule == '30 18 * * *')
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-        run: python news_engine.py
-
-      - name: Send daily skill-market report
-        if: always() && (github.event_name == 'workflow_dispatch' || github.event.schedule == '30 18 * * *')
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-        run: python skill_intelligence.py
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event.schedule }}" = "30 18 * * *" ]; then
+            python main.py --daily-report
+          else
+            python main.py
+          fi
 
       - name: Save sent jobs
         if: always()

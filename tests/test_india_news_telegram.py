@@ -2,14 +2,21 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from career_engine import INDIA_TIMEZONE, initialize_database, record_collection_run, save_job
+from career_engine import initialize_database, save_job
 from india_jobs import SOURCE_STATUS, run_india_job_engine
-from news_engine import ensure_news_columns, fetch_news, parse_anthropic_page, store_news
-from skill_intelligence import generate_daily_report
+from news_engine import (
+    ensure_news_columns,
+    fetch_news,
+    is_recent_publication,
+    parse_anthropic_page,
+    send_daily_news_report,
+    send_news_alerts,
+    store_news,
+)
 from telegram_utils import send_telegram_message
 
 
@@ -67,16 +74,23 @@ class IndiaNewsTelegramTests(unittest.TestCase):
                     "url": "https://example.com/ai-launch",
                     "title": "New AI model launch",
                     "summary": "A research model release.",
-                    "published": "2026-10-29",
+                    "published": datetime.now(timezone.utc).date().isoformat(),
                     "source": "Example AI",
                 }
-                self.assertEqual(len(store_news([item], connection)), 1)
+                unrelated_item = {
+                    "url": "https://example.com/company-update",
+                    "title": "Company office expansion",
+                    "summary": "A general facilities announcement.",
+                    "published": datetime.now(timezone.utc).date().isoformat(),
+                    "source": "OpenAI",
+                }
+                self.assertEqual(len(store_news([item, unrelated_item], connection)), 1)
                 self.assertEqual(len(store_news([item], connection)), 0)
                 category = connection.execute(
                     "SELECT category FROM news WHERE url = ?",
                     (item["url"],),
                 ).fetchone()[0]
-                self.assertEqual(category, "Models and releases")
+                self.assertEqual(category, "New Model Release")
             finally:
                 connection.close()
 
@@ -113,7 +127,7 @@ class IndiaNewsTelegramTests(unittest.TestCase):
                     "url": "https://example.com/ai-research",
                     "title": "AI research release",
                     "summary": "New machine learning research.",
-                    "published": "2026-10-29",
+                    "published": datetime.now(timezone.utc).date().isoformat(),
                     "source": "Working source",
                 }
             ],
@@ -133,22 +147,130 @@ class IndiaNewsTelegramTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(statuses, [("Unavailable source", 0), ("Working source", 1)])
 
-    def test_skill_report_suppresses_zero_result_when_sources_have_not_run(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = str(Path(directory) / "career.db")
-            result = generate_daily_report(path=path, report_date="2026-10-29", send=False)
-        self.assertNotIn("message", result)
-        self.assertEqual(result["sources_checked"], 0)
-
-    def test_skill_report_labels_partial_source_coverage(self):
+    def test_daily_news_report_is_sent_at_most_once_per_local_date(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "career.db")
             initialize_database(path)
-            record_collection_run("jobs", "Remote OK", True, items=0, path=path)
-            report_date = datetime.now(INDIA_TIMEZONE).date().isoformat()
-            result = generate_daily_report(path=path, report_date=report_date, send=False)
-        self.assertIn("1/6 configured global job sources succeeded", result["message"])
-        self.assertIn("Collection issues:", result["message"])
+            connection = sqlite3.connect(path)
+            try:
+                ensure_news_columns(connection)
+                store_news(
+                    [
+                        {
+                            "url": "https://example.com/ai-research",
+                            "title": "AI research breakthrough",
+                            "summary": "New machine learning research reports a method.",
+                            "published": datetime.now(timezone.utc).date().isoformat(),
+                            "source": "OpenAI",
+                        }
+                    ],
+                    connection,
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            messages = Mock(return_value={"ok": True})
+            with patch("news_engine.send_telegram_message", messages):
+                first = send_daily_news_report(path, report_date="2026-10-29")
+                second = send_daily_news_report(path, report_date="2026-10-29")
+                next_day = send_daily_news_report(path, report_date="2026-10-30")
+        self.assertFalse(first["already_sent"])
+        self.assertTrue(second["already_sent"])
+        self.assertEqual(messages.call_count, 2)
+        report = messages.call_args_list[0].args[0]
+        self.assertIn("DAILY AI/ML TRENDING REPORT", report)
+        self.assertIn("Publisher: OpenAI", report)
+        self.assertIn(
+            "Published: " + datetime.now(timezone.utc).date().isoformat(),
+            report,
+        )
+        self.assertIn("Why it matters:", report)
+        self.assertIn("https://example.com/ai-research", report)
+        self.assertEqual(next_day["items"], 0)
+        self.assertNotIn(
+            "https://example.com/ai-research",
+            messages.call_args_list[1].args[0],
+        )
+
+    def test_news_recency_uses_publisher_date_when_available(self):
+        recent = (datetime.now(timezone.utc) - timedelta(days=12)).date().isoformat()
+        self.assertTrue(is_recent_publication(recent))
+        self.assertFalse(is_recent_publication("2020-01-01"))
+        self.assertTrue(is_recent_publication(""))
+
+    def test_database_migration_removes_only_skill_report_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "career.db")
+            initialize_database(path)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "CREATE TABLE daily_skill_metrics (report_date TEXT, skill TEXT)"
+                )
+                connection.execute(
+                    "CREATE TABLE daily_skill_combinations (report_date TEXT, pair TEXT)"
+                )
+                connection.execute(
+                    "ALTER TABLE job_observations ADD COLUMN snapshot_version INTEGER NOT NULL DEFAULT 0"
+                )
+                connection.execute(
+                    """
+                    INSERT INTO jobs (dedupe_key, title, listing_url, created_at)
+                    VALUES ('job-key', 'AI Engineer', 'https://example.com/job', 'today')
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO news (url, title, created_at)
+                    VALUES ('https://example.com/news', 'AI research', 'today')
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            initialize_database(path)
+            connection = sqlite3.connect(path)
+            try:
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+                self.assertNotIn("daily_skill_metrics", tables)
+                self.assertNotIn("daily_skill_combinations", tables)
+                observation_columns = {
+                    row[1] for row in connection.execute("PRAGMA table_info(job_observations)")
+                }
+                self.assertNotIn("snapshot_version", observation_columns)
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1)
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM news").fetchone()[0], 1)
+            finally:
+                connection.close()
+
+    @patch("news_engine.send_telegram_message", return_value={"ok": True})
+    def test_important_news_is_not_notified_twice(self, send_message):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "career.db")
+            initialize_database(path)
+            connection = sqlite3.connect(path)
+            try:
+                ensure_news_columns(connection)
+                item = {
+                    "url": "https://example.com/model-launch",
+                    "title": "New AI model launch and release",
+                    "summary": "Research details on a new AI model release.",
+                    "published": datetime.now(timezone.utc).date().isoformat(),
+                    "source": "OpenAI",
+                }
+                stored = store_news([item], connection)
+                connection.commit()
+            finally:
+                connection.close()
+            self.assertEqual(send_news_alerts(stored, path), 1)
+            self.assertEqual(send_news_alerts(stored, path), 0)
+        send_message.assert_called_once()
 
     @patch.dict(os.environ, {"BOT_TOKEN": "test-token", "CHAT_ID": "test-chat"})
     @patch("telegram_utils.requests.post")
@@ -162,8 +284,6 @@ class IndiaNewsTelegramTests(unittest.TestCase):
 
     def test_engines_persist_data_and_send_separate_telegram_messages(self):
         from jobs import run_global_job_engine
-        from news_engine import send_news_alerts
-
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "career.db")
             job = {
@@ -178,12 +298,11 @@ class IndiaNewsTelegramTests(unittest.TestCase):
                 "url": "https://example.com/ai-launch",
                 "title": "New AI model launch",
                 "summary": "An AI model release.",
-                "published": "2026-10-29",
+                "published": datetime.now(timezone.utc).date().isoformat(),
                 "source": "OpenAI",
             }
             job_messages = Mock(return_value={"ok": True})
             news_messages = Mock(return_value={"ok": True})
-            skill_messages = Mock(return_value={"ok": True})
             with (
                 patch(
                     "jobs.SOURCE_SPECS",
@@ -201,26 +320,31 @@ class IndiaNewsTelegramTests(unittest.TestCase):
                     "news_engine.NEWS_SOURCES",
                     (("OpenAI", "rss", "https://example.com/news"),),
                 ),
-                patch("news_engine.fetch_source", return_value=[news_item]),
+                patch("news_engine.fetch_source", return_value=[news_item]                ),
                 patch("news_engine.send_telegram_message", news_messages),
-                patch("skill_intelligence.send_telegram_message", skill_messages),
             ):
                 job_result = run_global_job_engine(path)
                 news_items = fetch_news(path)
                 self.assertEqual(send_news_alerts(news_items, path), 1)
-                skill_result = generate_daily_report(path=path, send=True)
+                report_result = send_daily_news_report(path, report_date="2026-10-29")
 
             self.assertEqual(job_result["new_eligible"], 1)
             self.assertIn(
-                "NEW ELIGIBLE FRESHER/JUNIOR AI/ML JOB",
+                "NEW REMOTE AI/ML JOB",
                 job_messages.call_args.args[0],
             )
-            self.assertIn("DAILY AI / ML NEWS", news_messages.call_args.args[0])
-            self.assertIn("DAILY AI/ML SKILL INTELLIGENCE", skill_messages.call_args.args[0])
-            self.assertIn("message", skill_result)
+            self.assertIn(
+                "IMPORTANT AI/ML UPDATES",
+                news_messages.call_args_list[0].args[0],
+            )
+            self.assertIn(
+                "DAILY AI/ML TRENDING REPORT",
+                news_messages.call_args_list[1].args[0],
+            )
+            self.assertEqual(report_result["items"], 1)
             self.assertEqual(
-                (job_messages.call_count, news_messages.call_count, skill_messages.call_count),
-                (1, 1, 1),
+                (job_messages.call_count, news_messages.call_count),
+                (1, 2),
             )
 
             connection = sqlite3.connect(path)
@@ -232,7 +356,7 @@ class IndiaNewsTelegramTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     connection.execute("SELECT report_type FROM daily_reports").fetchone()[0],
-                    "skills",
+                    "news",
                 )
             finally:
                 connection.close()
