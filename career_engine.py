@@ -148,10 +148,129 @@ EXPERIENCE_OVER_TWO_PATTERN = re.compile(
     r"(?:years?|yrs?)\b",
     re.IGNORECASE,
 )
+EXPERIENCE_REQUIREMENT_PATTERN = re.compile(
+    r"\b(?P<minimum>\d+)\s*(?:-|–|to)\s*(?P<maximum>\d+)\s*"
+    r"(?:years?|yrs?)\b|"
+    r"\b(?P<single>\d+)\s*(?P<plus>\+)?\s*(?:years?|yrs?)\b",
+    re.IGNORECASE,
+)
 UP_TO_TWO_YEARS_PATTERN = re.compile(
     r"\b(?:up to|maximum of|no more than|less than)\s+2\s*(?:years?|yrs?)\b",
     re.IGNORECASE,
 )
+
+
+def analyze_experience(title, description="", seniority=""):
+    """Classify experience separately from the legacy alert/scoring group."""
+    text = normalize_text(" ".join((title or "", description or "", seniority or "")))
+    lowered = text.lower()
+
+    def category_for(minimum, maximum):
+        if minimum >= 5 or maximum > 5:
+            return "Senior"
+        if maximum <= 2:
+            return "0–2 Years"
+        if minimum >= 2 and maximum <= 3:
+            return "2–3 Years"
+        if minimum >= 3 and maximum <= 5:
+            return "3–5 Years"
+        if minimum < 2:
+            return "Fresher / Entry Level"
+        return "Experience not specified"
+
+    if re.search(r"\b(?:intern|internship)\b", lowered):
+        return {
+            "level": "Internship",
+            "requirement": "unspecified",
+            "evidence": "Internship title or description",
+            "conflict": False,
+        }
+
+    matches = []
+    for match in EXPERIENCE_REQUIREMENT_PATTERN.finditer(text):
+        sentence_start = max(
+            (text.rfind(separator, 0, match.start()) for separator in ".!?;\n"),
+            default=-1,
+        ) + 1
+        sentence_end_candidates = [
+            position
+            for separator in ".!?;\n"
+            if (position := text.find(separator, match.end())) >= 0
+        ]
+        sentence_end = min(sentence_end_candidates, default=len(text))
+        preceding = text[sentence_start:match.start()].lower()
+        following = text[match.end():sentence_end].lower()
+        context = preceding + " " + following
+        if re.search(r"\b(?:ago|old|since)\b", context):
+            continue
+        if match.group("minimum") is not None:
+            minimum = int(match.group("minimum"))
+            maximum = int(match.group("maximum"))
+            evidence = match.group(0)
+        else:
+            minimum = int(match.group("single"))
+            maximum = minimum if not match.group("plus") else 99
+            evidence = match.group(0)
+            if re.search(r"\b(?:up to|less than|at most|maximum of)\s*$", preceding):
+                minimum = 0
+        requirement = (
+            "preferred"
+            if re.search(r"\b(?:preferred|preferably|nice to have|bonus|ideally)\b", context)
+            else "required"
+        )
+        matches.append((minimum, maximum, requirement, evidence))
+
+    required = [item for item in matches if item[2] == "required"]
+    selected = required or matches
+    conflict = False
+    if len(required) > 1:
+        first_minimum, first_maximum = required[0][:2]
+        conflict = any(
+            max(first_minimum, item[0]) > min(first_maximum, item[1])
+            for item in required[1:]
+        )
+    if selected:
+        minimum, maximum, requirement, evidence = selected[0]
+        if maximum == 99:
+            level = "Senior" if minimum >= 5 else category_for(minimum, minimum)
+        else:
+            level = category_for(minimum, maximum)
+        return {
+            "level": level,
+            "requirement": requirement,
+            "evidence": evidence,
+            "conflict": conflict,
+        }
+
+    if re.search(
+        r"\b(?:fresher|freshers|new[- ]grad(?:uate)?s?|graduate trainee|"
+        r"graduates?|entry[- ]level|junior|associate engineer|"
+        r"no (?:prior )?experience)\b",
+        (title or "").lower(),
+    ) or re.search(
+        r"\b(?:fresher|freshers|new[- ]grad(?:uate)?s?|graduate trainee|"
+        r"entry[- ]level|junior|associate engineer|no (?:prior )?experience)\b",
+        lowered,
+    ):
+        return {
+            "level": "Fresher / Entry Level",
+            "requirement": "required",
+            "evidence": "Entry-level wording in title or description",
+            "conflict": False,
+        }
+    if re.search(r"\b(?:senior|lead|principal|staff)\b", (title or "").lower()):
+        return {
+            "level": "Senior",
+            "requirement": "unspecified",
+            "evidence": "Senior-level wording in title",
+            "conflict": False,
+        }
+    return {
+        "level": "Experience not specified",
+        "requirement": "unspecified",
+        "evidence": "",
+        "conflict": False,
+    }
 
 
 def normalize_url(url):
@@ -469,6 +588,10 @@ def initialize_database(path=DB_PATH):
                 india_eligibility TEXT NOT NULL DEFAULT 'unknown',
                 employment_category TEXT NOT NULL DEFAULT 'unknown',
                 experience_group TEXT NOT NULL DEFAULT 'unknown',
+                experience_level TEXT NOT NULL DEFAULT 'Experience not specified',
+                experience_requirement TEXT NOT NULL DEFAULT 'unspecified',
+                experience_evidence TEXT NOT NULL DEFAULT '',
+                experience_conflict INTEGER NOT NULL DEFAULT 0,
                 company_verification TEXT NOT NULL DEFAULT 'Unverified',
                 application_verified INTEGER NOT NULL DEFAULT 0,
                 notified_at TEXT,
@@ -537,6 +660,10 @@ def initialize_database(path=DB_PATH):
             "india_eligibility": "TEXT NOT NULL DEFAULT 'unknown'",
             "employment_category": "TEXT NOT NULL DEFAULT 'unknown'",
             "experience_group": "TEXT NOT NULL DEFAULT 'unknown'",
+            "experience_level": "TEXT NOT NULL DEFAULT 'Experience not specified'",
+            "experience_requirement": "TEXT NOT NULL DEFAULT 'unspecified'",
+            "experience_evidence": "TEXT NOT NULL DEFAULT ''",
+            "experience_conflict": "INTEGER NOT NULL DEFAULT 0",
             "company_verification": "TEXT NOT NULL DEFAULT 'Unverified'",
             "application_verified": "INTEGER NOT NULL DEFAULT 0",
             "notified_at": "TEXT",
@@ -632,8 +759,9 @@ def save_job(job, path=DB_PATH):
             (dedupe_key, title, company, source, listing_url, application_url,
              location, experience, salary, skills, score, published_at, closing_at,
              remote_status, india_eligibility, employment_category, experience_group,
+             experience_level, experience_requirement, experience_evidence, experience_conflict,
              company_verification, application_verified, last_seen_at, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(dedupe_key) DO UPDATE SET
               application_url=COALESCE(NULLIF(excluded.application_url, ''), jobs.application_url),
               score=excluded.score,
@@ -668,6 +796,19 @@ def save_job(job, path=DB_PATH):
                 WHEN excluded.experience_group = 'unknown' THEN jobs.experience_group
                 ELSE excluded.experience_group
               END,
+              experience_level=CASE
+                WHEN excluded.experience_level = 'Experience not specified' THEN jobs.experience_level
+                ELSE excluded.experience_level
+              END,
+              experience_requirement=CASE
+                WHEN excluded.experience_requirement = 'unspecified' THEN jobs.experience_requirement
+                ELSE excluded.experience_requirement
+              END,
+              experience_evidence=CASE
+                WHEN excluded.experience_evidence = '' THEN jobs.experience_evidence
+                ELSE excluded.experience_evidence
+              END,
+              experience_conflict=MAX(jobs.experience_conflict, excluded.experience_conflict),
               last_seen_at=excluded.last_seen_at,
               published_at=COALESCE(NULLIF(jobs.published_at, ''), excluded.published_at),
               closing_at=COALESCE(NULLIF(jobs.closing_at, ''), excluded.closing_at)
@@ -690,6 +831,10 @@ def save_job(job, path=DB_PATH):
                 job.get("india_eligibility", "unknown"),
                 job.get("employment_category", "unknown"),
                 job.get("experience_group", "unknown"),
+                job.get("experience_level", "Experience not specified"),
+                job.get("experience_requirement", "unspecified"),
+                job.get("experience_evidence", ""),
+                int(bool(job.get("experience_conflict", False))),
                 job.get("company_verification", "Unverified"),
                 int(bool(job.get("application_verified", False))),
                 now.isoformat(),

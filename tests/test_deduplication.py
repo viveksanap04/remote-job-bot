@@ -176,14 +176,29 @@ class JobDeduplicationTests(unittest.TestCase):
                 row = connection.execute(
                     """
                     SELECT remote_status, india_eligibility, experience_group,
-                           company_verification, application_verified, notified_at
+                           experience_level, experience_requirement, experience_evidence,
+                           experience_conflict, company_verification, application_verified,
+                           notified_at
                     FROM jobs
                     """
                 ).fetchone()
             finally:
                 connection.close()
-            self.assertEqual(row[:5], ("fully_remote", "eligible", "junior", "Unverified", 0))
-            self.assertIsNotNone(row[5])
+            self.assertEqual(
+                row[:8],
+                (
+                    "fully_remote",
+                    "eligible",
+                    "junior",
+                    "Fresher / Entry Level",
+                    "required",
+                    "Entry-level wording in title or description",
+                    0,
+                    "Unverified",
+                ),
+            )
+            self.assertEqual(row[8], 0)
+            self.assertIsNotNone(row[9])
             self.assertIn("NEW REMOTE AI/ML JOB", send_message.call_args.args[0])
 
     @patch("jobs.append_sent_job")

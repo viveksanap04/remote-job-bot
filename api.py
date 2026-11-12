@@ -35,15 +35,28 @@ def health():
 
 
 @app.get("/jobs")
-def jobs(limit: int = 100, location: str = "", minimum_score: int = 0):
+def jobs(
+    limit: int = 100,
+    location: str = "",
+    minimum_score: int = 0,
+    experience_level: str = "",
+):
     return query(
         """
         SELECT * FROM jobs
         WHERE score >= ? AND (? = '' OR lower(location) LIKE lower(?))
+          AND (? = '' OR experience_level = ?)
         ORDER BY score DESC, created_at DESC
         LIMIT ?
         """,
-        (minimum_score, location, f"%{location}%", min(max(limit, 1), 500)),
+        (
+            minimum_score,
+            location,
+            f"%{location}%",
+            experience_level,
+            experience_level,
+            min(max(limit, 1), 500),
+        ),
     )
 
 

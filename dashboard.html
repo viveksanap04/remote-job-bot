@@ -30,7 +30,20 @@
 <body>
   <header><h1>Vishes AI<br>Career Intelligence</h1><div class="status" id="status">Connecting to API</div></header>
   <main>
-    <div class="toolbar"><input id="location" placeholder="Filter location"><button onclick="loadData()">Refresh</button></div>
+    <div class="toolbar">
+      <input id="location" placeholder="Filter location">
+      <select id="experience">
+        <option value="">All experience levels</option>
+        <option>Fresher / Entry Level</option>
+        <option>0–2 Years</option>
+        <option>2–3 Years</option>
+        <option>3–5 Years</option>
+        <option>Senior</option>
+        <option>Internship</option>
+        <option>Experience not specified</option>
+      </select>
+      <button onclick="loadData()">Refresh</button>
+    </div>
     <div class="layout">
       <section><h2>Priority jobs</h2><div id="jobs">Loading...</div></section>
       <div>
@@ -44,12 +57,13 @@
     async function loadData() {
       try {
         const location = encodeURIComponent(document.getElementById('location').value);
+        const experience = encodeURIComponent(document.getElementById('experience').value);
         const [jobs, news] = await Promise.all([
-          fetch(`${api}/jobs?minimum_score=35&location=${location}`).then(response => response.json()),
+          fetch(`${api}/jobs?minimum_score=35&location=${location}&experience_level=${experience}`).then(response => response.json()),
           fetch(`${api}/news?limit=8`).then(response => response.json())
         ]);
         document.getElementById('status').textContent = 'Live intelligence feed';
-        document.getElementById('jobs').innerHTML = jobs.length ? jobs.map(job => `<article class="job"><span class="score">${job.score}/100</span><h3>${esc(job.title)}</h3><div class="meta">${esc(job.company)} · ${esc(job.location)} · ${esc(job.experience)}<br><a href="${esc(job.application_url || job.listing_url)}" target="_blank" rel="noreferrer">Open application</a></div></article>`).join('') : '<div class="meta">No matching jobs yet.</div>';
+        document.getElementById('jobs').innerHTML = jobs.length ? jobs.map(job => `<article class="job"><span class="score">${job.score}/100</span><h3>${esc(job.title)}</h3><div class="meta">${esc(job.company)} · ${esc(job.location)} · ${esc(job.experience_level || job.experience)}${job.experience_conflict ? ' · Conflicting experience requirements' : ''}<br>${esc(job.experience_evidence || '')}<br><a href="${esc(job.application_url || job.listing_url)}" target="_blank" rel="noreferrer">Open application</a></div></article>`).join('') : '<div class="meta">No matching jobs yet.</div>';
         document.getElementById('news').innerHTML = news.map(item => `<article class="news"><h3><a href="${esc(item.url)}" target="_blank" rel="noreferrer">${esc(item.title)}</a></h3><div class="meta">${esc(item.source)} · importance ${item.importance}</div></article>`).join('') || '<div class="meta">No news collected yet.</div>';
       } catch (error) { document.getElementById('status').textContent = 'API unavailable'; }
     }

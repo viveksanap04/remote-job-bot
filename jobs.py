@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 
 from career_engine import (
     DB_PATH,
+    analyze_experience,
     has_job_alerted,
     initialize_database,
     is_fresher_experience,
@@ -570,6 +571,9 @@ def process_job(job, source, sent_urls, path=DB_PATH):
     experience_group = job_experience_group(
         title, job["summary"], job.get("seniority", "")
     )
+    experience_analysis = analyze_experience(
+        title, job["summary"], job.get("seniority", "")
+    )
     seniority_text = " ".join(
         (title, job.get("summary", ""), job.get("seniority", ""))
     )
@@ -598,6 +602,10 @@ def process_job(job, source, sent_urls, path=DB_PATH):
         "india_eligibility": india_status,
         "employment_category": india_category(job, remote_status, india_eligible),
         "experience_group": experience_group,
+        "experience_level": experience_analysis["level"],
+        "experience_requirement": experience_analysis["requirement"],
+        "experience_evidence": experience_analysis["evidence"],
+        "experience_conflict": experience_analysis["conflict"],
         "company_verification": "Unverified",
         "application_verified": False,
         "analysis": analysis,

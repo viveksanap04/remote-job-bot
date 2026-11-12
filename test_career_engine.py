@@ -1,6 +1,7 @@
 import unittest
 
 from career_engine import (
+    analyze_experience,
     detect_experience,
     india_eligibility_status,
     is_fresher_experience,
@@ -11,6 +12,51 @@ from career_engine import (
 
 
 class JobEligibilityTests(unittest.TestCase):
+    def test_experience_analysis_classifies_levels_and_keeps_unknown(self):
+        self.assertEqual(
+            analyze_experience("Graduate AI Engineer")["level"],
+            "Fresher / Entry Level",
+        )
+        self.assertEqual(
+            analyze_experience("ML Engineer", "0-2 years experience")["level"],
+            "0–2 Years",
+        )
+        self.assertEqual(
+            analyze_experience("ML Engineer", "2-3 years experience")["level"],
+            "2–3 Years",
+        )
+        self.assertEqual(
+            analyze_experience("ML Engineer", "3-5 years experience")["level"],
+            "3–5 Years",
+        )
+        self.assertEqual(
+            analyze_experience("Senior ML Engineer")["level"],
+            "Senior",
+        )
+        self.assertEqual(
+            analyze_experience("ML internship")["level"],
+            "Internship",
+        )
+        self.assertEqual(
+            analyze_experience("AI Engineer", "Experience not specified")["level"],
+            "Experience not specified",
+        )
+
+    def test_experience_analysis_distinguishes_preferred_and_conflicting_ranges(self):
+        preferred = analyze_experience(
+            "AI Engineer",
+            "0-2 years required. 3-5 years preferred.",
+        )
+        self.assertEqual(preferred["level"], "0–2 Years")
+        self.assertEqual(preferred["requirement"], "required")
+        self.assertFalse(preferred["conflict"])
+
+        conflict = analyze_experience(
+            "AI Engineer",
+            "0-2 years required. 5 years experience required.",
+        )
+        self.assertTrue(conflict["conflict"])
+
     def test_accepts_fresher_and_two_year_requirements(self):
         self.assertTrue(is_fresher_experience("Graduate AI Engineer"))
         self.assertTrue(is_fresher_experience("ML Engineer", "0-2 years of experience"))
