@@ -4,6 +4,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from html import unescape
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -42,10 +43,26 @@ SOURCE_SPECS = (
     ("Remotive", "remotive", "https://remotive.com/api/remote-jobs?limit=100"),
     ("Jobicy", "jobicy", "https://jobicy.com/api/v2/remote-jobs?count=100"),
     ("Arbeitnow", "arbeitnow", "https://www.arbeitnow.com/api/job-board-api"),
+    (
+        "Anthropic",
+        "greenhouse",
+        "https://boards-api.greenhouse.io/v1/boards/anthropic/jobs?content=true",
+    ),
+    (
+        "Databricks",
+        "greenhouse",
+        "https://boards-api.greenhouse.io/v1/boards/databricks/jobs?content=true",
+    ),
+    (
+        "Scale AI",
+        "greenhouse",
+        "https://boards-api.greenhouse.io/v1/boards/scaleai/jobs?content=true",
+    ),
 )
 SOURCE_LIMITATIONS = {
     "Working Nomads": "Not integrated: the probed public RSS URL returned HTTP 404; no replacement feed/API was verified.",
     "Remote.co": "Not integrated: the public feed probe timed out; no stable public API/feed was verified.",
+    "Jobspresso": "Not integrated: the public RSS feed returned no entries during the latest check.",
 }
 
 AI_ROLE_PATTERN = re.compile(
@@ -309,6 +326,32 @@ def parse_arbeitnow(response, source):
     return jobs
 
 
+def parse_greenhouse(response, source):
+    data = response.json()
+    if not isinstance(data, dict) or not isinstance(data.get("jobs"), list):
+        raise ValueError(f"{source} returned an unexpected Greenhouse response")
+    jobs = []
+    for item in data["jobs"]:
+        if not isinstance(item, dict):
+            continue
+        location = item.get("location") or ""
+        if isinstance(location, dict):
+            location = location.get("name", "")
+        job = source_job(
+            item.get("title", ""),
+            unescape(item.get("content", "")),
+            item.get("absolute_url", ""),
+            source,
+            company=item.get("company_name") or source,
+            location=location,
+            published=item.get("first_published", ""),
+            closing=item.get("application_deadline", ""),
+        )
+        if job:
+            jobs.append(job)
+    return jobs
+
+
 SOURCE_PARSERS = {
     "rss": parse_we_work_remotely,
     "remoteok": parse_remote_ok,
@@ -316,6 +359,7 @@ SOURCE_PARSERS = {
     "remotive": parse_remotive,
     "jobicy": parse_jobicy,
     "arbeitnow": parse_arbeitnow,
+    "greenhouse": parse_greenhouse,
 }
 
 
