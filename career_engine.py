@@ -165,18 +165,26 @@ def analyze_experience(title, description="", seniority=""):
     text = normalize_text(" ".join((title or "", description or "", seniority or "")))
     lowered = text.lower()
 
-    def category_for(minimum, maximum):
+    def category_for(minimum, maximum, open_ended=False):
+        if open_ended:
+            if minimum >= 5:
+                return "Senior"
+            if minimum >= 3:
+                return "3–5 Years"
+            if minimum >= 2:
+                return "2–3 Years"
+            return "0–2 Years"
         if minimum >= 5 or maximum > 5:
             return "Senior"
         if maximum <= 2:
             return "0–2 Years"
+        if minimum >= 3:
+            return "3–5 Years"
         if minimum >= 2 and maximum <= 3:
             return "2–3 Years"
-        if minimum >= 3 and maximum <= 5:
+        if minimum >= 2:
             return "3–5 Years"
-        if minimum < 2:
-            return "Fresher / Entry Level"
-        return "Experience not specified"
+        return "2–3 Years"
 
     if re.search(r"\b(?:intern|internship)\b", lowered):
         return {
@@ -231,10 +239,7 @@ def analyze_experience(title, description="", seniority=""):
         )
     if selected:
         minimum, maximum, requirement, evidence = selected[0]
-        if maximum == 99:
-            level = "Senior" if minimum >= 5 else category_for(minimum, minimum)
-        else:
-            level = category_for(minimum, maximum)
+        level = category_for(minimum, maximum, open_ended=maximum == 99)
         return {
             "level": level,
             "requirement": requirement,
@@ -465,7 +470,7 @@ def india_eligibility_status(description="", location="", location_restrictions=
     ):
         return "ineligible"
 
-    if re.search(r"\bindia\b", structured_location):
+    if mentions_india(structured_location):
         return "eligible"
 
     india_acceptance_patterns = (
@@ -505,14 +510,19 @@ def is_india_eligible(description="", location="", location_restrictions=""):
     return india_eligibility_status(description, location, location_restrictions) == "eligible"
 
 
+def mentions_india(text):
+    """Match India or Indian without treating Indiana or Indianapolis as India."""
+    return bool(re.search(r"\bindia(?:n)?\b", normalize_text(text), re.IGNORECASE))
+
+
 def detect_location(text):
     lowered = normalize_text(text).lower()
     if "worldwide" in lowered or "anywhere" in lowered:
         return "Worldwide"
-    if "india" in lowered or "indian" in lowered:
-        return "India"
     if re.search(r"\b(us|usa|united states|u\.s\.)\b", lowered):
         return "US"
+    if mentions_india(lowered):
+        return "India"
     if any(region in lowered for region in ("europe", "european union", "eu only")):
         return "Europe"
     if "remote" in lowered:
@@ -564,8 +574,14 @@ def score_job(title, description, company="", location="", salary="", india_elig
     }
 
 
+def connect_database(path=DB_PATH):
+    connection = sqlite3.connect(path, timeout=30)
+    connection.execute("PRAGMA busy_timeout = 30000")
+    return connection
+
+
 def initialize_database(path=DB_PATH):
-    connection=sqlite3.connect(path)
+    connection = connect_database(path)
     try:
         connection.executescript(
             """
@@ -649,6 +665,12 @@ def initialize_database(path=DB_PATH):
                 sent_at TEXT NOT NULL,
                 PRIMARY KEY (report_date, report_type)
             );
+            CREATE INDEX IF NOT EXISTS idx_jobs_priority
+                ON jobs (score DESC, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_news_priority
+                ON news (importance DESC, published_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_jobs_notified
+                ON jobs (dedupe_key, notified_at);
             """
         )
         connection.execute("DROP TABLE IF EXISTS daily_skill_metrics")
@@ -707,7 +729,7 @@ def initialize_database(path=DB_PATH):
 
 def save_job(job, path=DB_PATH):
     initialize_database(path)
-    connection=sqlite3.connect(path)
+    connection = connect_database(path)
     try:
         dedupe_key = job["analysis"]["dedupe_key"]
         listing_url = normalize_url(job.get("link", ""))
@@ -883,7 +905,7 @@ def save_job(job, path=DB_PATH):
 
 def is_known_job(dedupe_key, path=DB_PATH):
     initialize_database(path)
-    connection=sqlite3.connect(path)
+    connection = connect_database(path)
     try:
         row = connection.execute(
             "SELECT 1 FROM jobs WHERE dedupe_key = ? LIMIT 1",
@@ -896,7 +918,7 @@ def is_known_job(dedupe_key, path=DB_PATH):
 
 def has_job_alerted(dedupe_key, path=DB_PATH):
     initialize_database(path)
-    connection = sqlite3.connect(path)
+    connection = connect_database(path)
     try:
         row = connection.execute(
             "SELECT 1 FROM jobs WHERE dedupe_key = ? AND notified_at IS NOT NULL LIMIT 1",
@@ -909,7 +931,7 @@ def has_job_alerted(dedupe_key, path=DB_PATH):
 
 def mark_job_alerted(dedupe_key, path=DB_PATH):
     initialize_database(path)
-    connection = sqlite3.connect(path)
+    connection = connect_database(path)
     try:
         connection.execute(
             "UPDATE jobs SET notified_at = ? WHERE dedupe_key = ?",
@@ -923,7 +945,7 @@ def mark_job_alerted(dedupe_key, path=DB_PATH):
 def record_collection_run(engine, source, success, items=0, error="", path=DB_PATH):
     initialize_database(path)
     now = datetime.now(timezone.utc).isoformat()
-    connection = sqlite3.connect(path)
+    connection = connect_database(path)
     try:
         connection.execute(
             """
@@ -939,10 +961,21 @@ def record_collection_run(engine, source, success, items=0, error="", path=DB_PA
 
 
 def create_application(job_id, path=DB_PATH):
+    """Track one application per job. Repeat saves return the existing record."""
     initialize_database(path)
-    connection=sqlite3.connect(path)
+    connection = connect_database(path)
     try:
-        connection.execute("INSERT INTO applications (job_id) VALUES (?)", (job_id,))
+        existing = connection.execute(
+            "SELECT id FROM applications WHERE job_id = ? ORDER BY id LIMIT 1",
+            (job_id,),
+        ).fetchone()
+        if existing:
+            return existing[0]
+        cursor = connection.execute(
+            "INSERT INTO applications (job_id) VALUES (?)",
+            (job_id,),
+        )
         connection.commit()
+        return cursor.lastrowid
     finally:
         connection.close()

@@ -12,7 +12,7 @@ from career_engine import (
     record_collection_run,
     save_job,
 )
-from jobs import process_job, run_global_job_engine
+from jobs import load_sent_jobs, process_job, run_global_job_engine
 
 
 def build_job(source, url):
@@ -200,6 +200,42 @@ class JobDeduplicationTests(unittest.TestCase):
             self.assertEqual(row[8], 0)
             self.assertIsNotNone(row[9])
             self.assertIn("NEW REMOTE AI/ML JOB", send_message.call_args.args[0])
+        self.assertIn("Fresher / Entry Level", send_message.call_args.args[0])
+
+    @patch("jobs.append_sent_job")
+    @patch("jobs.get_application_link", return_value="https://example.com/apply")
+    @patch("jobs.send_telegram_message", return_value={"ok": True})
+    def test_manager_in_the_description_does_not_hide_a_junior_role(
+        self,
+        send_message,
+        _application_link,
+        _append_sent_job,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "career.db")
+            junior = {
+                **build_job("Remotive", "https://example.com/junior-manager-mention"),
+                "summary": "Junior role. Report to the engineering manager. Remote worldwide.",
+                "location": "India",
+                "remote": True,
+            }
+            senior = {
+                **build_job("Remotive", "https://example.com/senior-title"),
+                "title": "Senior AI Engineer",
+                "summary": "Remote worldwide. Python and PyTorch.",
+                "location": "Worldwide",
+                "remote": True,
+            }
+            self.assertEqual(process_job(junior, "Remotive", set(), path), (True, True))
+            self.assertEqual(process_job(senior, "Remotive", set(), path), (True, False))
+        send_message.assert_called_once()
+
+    def test_unreadable_sent_jobs_file_does_not_abort_collection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sent_path = Path(directory) / "sent_jobs.json"
+            sent_path.write_text("{", encoding="utf-8")
+            with patch("jobs.SENT_JOBS_PATH", sent_path):
+                self.assertEqual(load_sent_jobs(), set())
 
     @patch("jobs.append_sent_job")
     @patch("jobs.get_application_link", return_value="https://example.com/apply")

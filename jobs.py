@@ -21,6 +21,7 @@ from career_engine import (
     is_fully_remote,
     india_eligibility_status,
     mark_job_alerted,
+    mentions_india,
     normalize_text,
     normalize_url,
     record_collection_run,
@@ -63,23 +64,27 @@ SENIOR_ROLE_PATTERN = re.compile(
 )
 
 
-def request_source(url):
+def request_source(url, attempts=3):
     last_error = None
-    for attempt in range(3):
+    attempts = max(1, attempts)
+    for attempt in range(attempts):
         try:
             response = requests.get(
                 url,
                 timeout=20,
-                headers={"Accept": "application/json, application/rss+xml, application/xml, text/xml"},
+                headers={
+                    "Accept": "application/json, application/rss+xml, application/xml, text/xml",
+                    "User-Agent": USER_AGENT,
+                },
                 verify=certifi.where(),
             )
             response.raise_for_status()
             return response
         except requests.RequestException as error:
             last_error = error
-            if attempt < 2:
+            if attempt < attempts - 1:
                 time.sleep(2**attempt)
-    raise RuntimeError(f"Unable to fetch source after 3 attempts: {last_error}")
+    raise RuntimeError(f"Unable to fetch source after {attempts} attempts: {last_error}")
 
 
 def html_text(value):
@@ -326,6 +331,7 @@ def get_application_link(job_url):
         "remotive.com",
         "jobicy.com",
         "arbeitnow.com",
+        "himalayas.app",
         "linkedin.com",
         "facebook.com",
         "twitter.com",
@@ -351,8 +357,14 @@ def get_application_link(job_url):
         "start application",
         "submit application",
     )
+    if any(
+        hostname == domain or hostname.endswith(f".{domain}")
+        for hostname in [(urlparse(job_url).hostname or "").lower().removeprefix("www.")]
+        for domain in application_domains
+    ):
+        return job_url
     try:
-        response = request_source(job_url)
+        response = request_source(job_url, attempts=1)
     except (requests.RequestException, RuntimeError) as error:
         print(f"Application link lookup failed: {error}")
         return job_url
@@ -445,7 +457,7 @@ def india_category(job, remote_status, india_eligible):
             ]
         )
     ).lower()
-    if "india" not in location_text and not india_eligible:
+    if not mentions_india(location_text) and not india_eligible:
         return "unknown"
     if remote_status == "fully_remote":
         return "India Remote"
@@ -509,11 +521,25 @@ def work_classification(job, remote_status, india_status):
 def load_sent_jobs():
     if not SENT_JOBS_PATH.exists():
         return set()
-    with SENT_JOBS_PATH.open(encoding="utf-8") as file:
-        values = json.load(file)
-    if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
-        raise ValueError(f"{SENT_JOBS_PATH} must contain a JSON array of URL strings")
-    return {normalize_url(value) for value in values}
+    try:
+        with SENT_JOBS_PATH.open(encoding="utf-8") as file:
+            values = json.load(file)
+    except (OSError, json.JSONDecodeError) as error:
+        print(
+            "Ignoring unreadable sent_jobs.json "
+            f"({error}); jobs already marked notified will not be sent again."
+        )
+        return set()
+    if not isinstance(values, list):
+        print("Ignoring sent_jobs.json because it is not a JSON array of URLs.")
+        return set()
+    urls = set()
+    for value in values:
+        if isinstance(value, str):
+            normalized = normalize_url(value)
+            if normalized:
+                urls.add(normalized)
+    return urls
 
 
 def append_sent_job(job_url):
@@ -523,6 +549,18 @@ def append_sent_job(job_url):
         urls.add(normalized_url)
         with SENT_JOBS_PATH.open("w", encoding="utf-8") as file:
             json.dump(sorted(urls), file, indent=4)
+
+
+def experience_label(job, analysis):
+    level = job.get("experience_level") or analysis["experience"]
+    requirement = job.get("experience_requirement") or ""
+    if requirement == "preferred":
+        level = f"{level} (preferred)"
+    elif requirement == "required" and level == "Experience not specified":
+        level = analysis["experience"]
+    if job.get("experience_conflict"):
+        level = f"{level} (conflicting requirements)"
+    return level
 
 
 def build_alert(job, analysis, application_url):
@@ -539,7 +577,7 @@ def build_alert(job, analysis, application_url):
 💼 Role: {job["title"]}
 🏢 Company: {job.get("company") or "Not specified"}
 📡 Source: {job["source"]}
-🎯 Experience: {analysis["experience"]}
+🎯 Experience: {experience_label(job, analysis)}
 🤖 Skills: {" • ".join(analysis["skills"]) or "Not specified"}
 🌍 Work mode: {work}
 📍 Location: {location}
@@ -574,12 +612,10 @@ def process_job(job, source, sent_urls, path=DB_PATH):
     experience_analysis = analyze_experience(
         title, job["summary"], job.get("seniority", "")
     )
-    seniority_text = " ".join(
-        (title, job.get("summary", ""), job.get("seniority", ""))
-    )
+    title_seniority = " ".join((title, job.get("seniority", "")))
     eligible_for_alert = (
         experience_group in {"fresher", "junior", "unknown"}
-        and not SENIOR_ROLE_PATTERN.search(seniority_text)
+        and not SENIOR_ROLE_PATTERN.search(title_seniority)
         and remote_status == "fully_remote"
     )
     analysis = score_job(

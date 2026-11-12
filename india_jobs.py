@@ -1,6 +1,4 @@
-import sqlite3
-
-from career_engine import DB_PATH, initialize_database
+from career_engine import DB_PATH, connect_database, initialize_database
 
 
 SOURCE_STATUS = {
@@ -15,7 +13,7 @@ SOURCE_STATUS = {
 def run_india_job_engine(path=DB_PATH):
     """Summarize India job categories already collected by the global sources."""
     initialize_database(path)
-    connection = sqlite3.connect(path)
+    connection = connect_database(path)
     try:
         counts = {
             category: count

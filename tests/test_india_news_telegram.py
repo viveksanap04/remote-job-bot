@@ -13,6 +13,7 @@ from news_engine import (
     fetch_news,
     is_recent_publication,
     parse_anthropic_page,
+    parse_feed,
     send_daily_news_report,
     send_news_alerts,
     store_news,
@@ -91,8 +92,38 @@ class IndiaNewsTelegramTests(unittest.TestCase):
                     (item["url"],),
                 ).fetchone()[0]
                 self.assertEqual(category, "New Model Release")
+                html_item = {
+                    "url": "https://example.com/html-ai",
+                    "title": "<b>Vision model release</b>",
+                    "summary": "<p>New computer vision model.</p>",
+                    "published": datetime.now(timezone.utc).date().isoformat(),
+                    "source": "Example AI",
+                }
+                stored_html = store_news([html_item], connection)
+                self.assertEqual(stored_html[0]["title"], "Vision model release")
+                self.assertNotIn("<", stored_html[0]["summary"])
             finally:
                 connection.close()
+
+    @patch("news_engine.feedparser.parse")
+    def test_feed_with_entries_is_kept_when_the_parser_reports_a_minor_error(self, parse):
+        parse.return_value = Mock(
+            bozo=True,
+            entries=[
+                {
+                    "title": "AI model update",
+                    "link": "https://example.com/feed-item",
+                    "summary": "machine learning",
+                    "published": "",
+                }
+            ],
+        )
+        entries = parse_feed("Example", Mock(content=b"xml"))
+        self.assertEqual(entries[0]["title"], "AI model update")
+
+        parse.return_value = Mock(bozo=True, entries=[])
+        with self.assertRaises(ValueError):
+            parse_feed("Example", Mock(content=b""))
 
     def test_anthropic_parser_extracts_available_summary_and_publication_date(self):
         response = Mock(

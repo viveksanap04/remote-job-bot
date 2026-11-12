@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 from career_engine import (
     DB_PATH,
     INDIA_TIMEZONE,
+    connect_database,
     initialize_database,
     normalize_text,
     normalize_url,
@@ -94,6 +95,8 @@ def is_same_story(title, summary, existing_title, existing_summary):
     existing = content_tokens(existing_title, existing_summary)
     if not incoming or not existing:
         return False
+    if len(incoming) < 4 or len(existing) < 4:
+        return incoming == existing
     overlap = len(incoming & existing) / max(1, min(len(incoming), len(existing)))
     return overlap >= 0.72
 
@@ -112,7 +115,7 @@ def ensure_news_columns(connection):
 
 def parse_feed(source, response):
     feed = feedparser.parse(response.content)
-    if feed.bozo:
+    if feed.bozo and not feed.entries:
         raise ValueError(f"{source} returned an invalid RSS feed")
     entries = [
         {
@@ -180,18 +183,27 @@ def fetch_source(source, source_type, source_url):
 
 def store_news(entries, connection):
     stored = []
-    existing = connection.execute("SELECT url, title, summary FROM news").fetchall()
+    existing = connection.execute(
+        "SELECT url, title, summary, content_hash FROM news"
+    ).fetchall()
     for entry in entries:
         url = normalize_url(entry["url"])
-        title = normalize_text(entry["title"])
-        summary = normalize_text(entry["summary"])
+        title = clean_summary(entry["title"])
+        summary = clean_summary(entry["summary"])
         source = entry.get("source", "")
         topic_text = f"{title} {summary}"
         if source.startswith("arXiv"):
             topic_text += f" {source}"
         if not url or not title or not NEWS_TOPIC_PATTERN.search(topic_text):
             continue
-        if any(url == row[0] or is_same_story(title, summary, row[1], row[2]) for row in existing):
+        digest = content_hash(title, summary)
+        category = topic_category(title, summary)
+        if any(
+            url == row[0]
+            or (row[3] and row[3] == digest)
+            or is_same_story(title, summary, row[1], row[2])
+            for row in existing
+        ):
             continue
         connection.execute(
             """
@@ -207,11 +219,11 @@ def store_news(entries, connection):
                 importance_score(title, summary),
                 entry["published"],
                 datetime.now(timezone.utc).isoformat(),
-                content_hash(title, summary),
-                topic_category(title, summary),
+                digest,
+                category,
             ),
         )
-        existing.append((url, title, summary))
+        existing.append((url, title, summary, digest))
         stored.append(
             {
                 **entry,
@@ -219,7 +231,7 @@ def store_news(entries, connection):
                 "url": url,
                 "title": title,
                 "summary": summary,
-                "category": topic_category(title, summary),
+                "category": category,
             }
         )
     return stored
@@ -230,27 +242,28 @@ def fetch_news(path=DB_PATH, return_status=False):
     stored = []
     successful_sources = 0
     issues = []
-    connection = sqlite3.connect(path)
+    connection = connect_database(path)
     try:
         ensure_news_columns(connection)
         for source, source_type, source_url in NEWS_SOURCES:
             try:
                 entries = fetch_source(source, source_type, source_url)
                 new_entries = store_news(entries, connection)
-                stored.extend(new_entries)
                 connection.commit()
-                successful_sources += 1
-                record_collection_run("news", source, True, items=len(entries), path=path)
-                print(
-                    f"{source}: collected {len(entries)} entries, "
-                    f"{len(new_entries)} new AI/ML articles"
-                )
             except (requests.RequestException, RuntimeError, ValueError, sqlite3.Error) as error:
                 message = f"{source}: {error}"
-                print(f"{message}")
+                print(message)
                 issues.append(message)
                 connection.rollback()
                 record_collection_run("news", source, False, error=message, path=path)
+                continue
+            stored.extend(new_entries)
+            successful_sources += 1
+            record_collection_run("news", source, True, items=len(entries), path=path)
+            print(
+                f"{source}: collected {len(entries)} entries, "
+                f"{len(new_entries)} new AI/ML articles"
+            )
         if not successful_sources:
             raise RuntimeError("Failed to fetch AI news from every configured source")
         connection.commit()
@@ -262,7 +275,7 @@ def fetch_news(path=DB_PATH, return_status=False):
 
 
 def send_news_alerts(items, path=DB_PATH):
-    connection = sqlite3.connect(path)
+    connection = connect_database(path)
     try:
         candidate_ids = [item["id"] for item in items if item.get("id")]
         if not candidate_ids:
@@ -360,7 +373,7 @@ def why_it_matters(category):
 def send_daily_news_report(path=DB_PATH, report_date=None):
     initialize_database(path)
     report_date = report_date or datetime.now(INDIA_TIMEZONE).date().isoformat()
-    connection = sqlite3.connect(path, timeout=30)
+    connection = connect_database(path)
     try:
         connection.execute("BEGIN IMMEDIATE")
         already_sent = connection.execute(

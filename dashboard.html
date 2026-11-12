@@ -12,27 +12,34 @@
     h1 { margin:0; font-size:clamp(2rem,5vw,4.4rem); line-height:.95; font-weight:500; letter-spacing:0; max-width:620px; }
     .status { color:var(--teal); font-family:system-ui,sans-serif; font-size:.8rem; text-transform:uppercase; letter-spacing:.08em; }
     main { max-width:1180px; margin:auto; padding:0 24px 48px; }
-    .toolbar { display:flex; gap:10px; margin:12px 0 28px; font-family:system-ui,sans-serif; }
-    input, button { border:1px solid var(--line); background:var(--panel); padding:11px 13px; border-radius:4px; font:inherit; }
+    .toolbar { display:flex; gap:10px; margin:12px 0 28px; font-family:system-ui,sans-serif; flex-wrap:wrap; }
+    input, button, select { border:1px solid var(--line); background:var(--panel); padding:11px 13px; border-radius:4px; font:14px system-ui,sans-serif; color:var(--ink); }
     button { background:var(--ink); color:white; cursor:pointer; }
-    .layout { display:grid; grid-template-columns:1.5fr 1fr; gap:18px; }
+    button.secondary { background:transparent; color:var(--ink); }
+    button:disabled { opacity:.55; cursor:default; }
+    .layout { display:grid; grid-template-columns:1.5fr .9fr; gap:18px; }
     section { background:var(--panel); border:1px solid var(--line); padding:20px; }
+    section + section { margin-top:18px; }
     h2 { margin:0 0 16px; font-size:1.25rem; font-weight:500; }
-    .job, .news { border-top:1px solid var(--line); padding:15px 0; }
-    .job:first-child, .news:first-child { border-top:0; padding-top:0; }
-    .job h3, .news h3 { margin:0 0 6px; font-size:1.08rem; font-weight:600; }
+    .job, .news, .application { border-top:1px solid var(--line); padding:15px 0; }
+    .job:first-child, .news:first-child, .application:first-child { border-top:0; padding-top:0; }
+    .job h3, .news h3, .application h3 { margin:0 0 6px; font-size:1.08rem; font-weight:600; }
     .meta { color:var(--muted); font-family:system-ui,sans-serif; font-size:.82rem; line-height:1.5; }
     a { color:var(--accent); text-decoration:none; }
     .score { float:right; color:var(--teal); font-family:system-ui,sans-serif; font-weight:700; }
-    @media (max-width:760px) { header { display:block; } .status { margin-top:18px; } .layout { grid-template-columns:1fr; } .toolbar { flex-wrap:wrap; } input { flex:1; min-width:180px; } }
+    .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+    @media (max-width:760px) { header { display:block; } .status { margin-top:18px; } .layout { grid-template-columns:1fr; } input, select { flex:1; min-width:140px; } }
   </style>
 </head>
 <body>
-  <header><h1>Vishes AI<br>Career Intelligence</h1><div class="status" id="status">Connecting to API</div></header>
+  <header>
+    <h1>Vishes AI<br>Career Intelligence</h1>
+    <div class="status" id="status">Connecting to API</div>
+  </header>
   <main>
     <div class="toolbar">
-      <input id="location" placeholder="Filter location">
-      <select id="experience">
+      <input id="location" placeholder="Filter location" aria-label="Filter location">
+      <select id="experience" aria-label="Experience level">
         <option value="">All experience levels</option>
         <option>Fresher / Entry Level</option>
         <option>0–2 Years</option>
@@ -42,31 +49,159 @@
         <option>Internship</option>
         <option>Experience not specified</option>
       </select>
-      <button onclick="loadData()">Refresh</button>
+      <select id="remote" aria-label="Work mode">
+        <option value="">All work modes</option>
+        <option value="fully_remote">Fully remote</option>
+        <option value="hybrid">Hybrid</option>
+        <option value="onsite">Onsite</option>
+        <option value="unknown">Work mode unknown</option>
+      </select>
+      <select id="india" aria-label="India eligibility">
+        <option value="">Any India eligibility</option>
+        <option value="eligible">India eligible</option>
+        <option value="unknown">India unknown</option>
+        <option value="ineligible">India ineligible</option>
+      </select>
+      <button id="refresh" type="button">Refresh</button>
     </div>
     <div class="layout">
       <section><h2>Priority jobs</h2><div id="jobs">Loading...</div></section>
       <div>
-        <section style="margin-top:18px"><h2>AI news</h2><div id="news">Loading...</div></section>
+        <section><h2>Applications</h2><div id="applications">Loading...</div></section>
+        <section><h2>AI news</h2><div id="news">Loading...</div></section>
       </div>
     </div>
   </main>
   <script>
-    const api = 'http://127.0.0.1:8000';
-    const esc = value => String(value || '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
+    const api = location.protocol === 'file:' ? 'http://127.0.0.1:8000' : '';
+    const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
+    const list = value => Array.isArray(value) ? value : [];
+    let trackedJobIds = new Set();
+
+    function jobLink(job) {
+      return job.application_url || job.listing_url || '';
+    }
+
+    async function readJson(response) {
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(detail || response.statusText);
+      }
+      return response.json();
+    }
+
+    async function trackJob(jobId) {
+      await readJson(await fetch(`${api}/applications/${jobId}`, { method: 'POST' }));
+      await loadData();
+    }
+
+    async function setStatus(applicationId, status) {
+      await readJson(await fetch(`${api}/applications/${applicationId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status })
+      }));
+      await loadData();
+    }
+
+    function renderJobs(jobs) {
+      const node = document.getElementById('jobs');
+      if (!jobs.length) {
+        node.innerHTML = '<div class="meta">No matching jobs yet.</div>';
+        return;
+      }
+      node.innerHTML = jobs.map(job => {
+        const tracked = trackedJobIds.has(job.id);
+        const link = jobLink(job);
+        return `<article class="job">
+          <span class="score">${esc(job.score)}/100</span>
+          <h3>${esc(job.title)}</h3>
+          <div class="meta">
+            ${esc(job.company || 'Company not specified')} · ${esc(job.location || 'Location not specified')}<br>
+            ${esc(job.experience_level || job.experience || 'Experience not specified')}
+            ${job.experience_conflict ? ' · Conflicting experience requirements' : ''}
+            · ${esc(job.remote_status || 'unknown')} · India ${esc(job.india_eligibility || 'unknown')}<br>
+            ${esc(job.skills || 'Skills not specified')}<br>
+            ${esc(job.source || '')}
+            ${link ? `<br><a href="${esc(link)}" target="_blank" rel="noreferrer">Open application</a>` : ''}
+          </div>
+          <div class="actions">
+            <button class="secondary" type="button" data-track="${job.id}" ${tracked ? 'disabled' : ''}>${tracked ? 'Tracking' : 'Track application'}</button>
+          </div>
+        </article>`;
+      }).join('');
+      node.querySelectorAll('[data-track]').forEach(button => {
+        button.addEventListener('click', () => trackJob(button.dataset.track));
+      });
+    }
+
+    function renderApplications(applications) {
+      const node = document.getElementById('applications');
+      if (!applications.length) {
+        node.innerHTML = '<div class="meta">No tracked applications yet.</div>';
+        return;
+      }
+      const statuses = ['Saved', 'Applied', 'Interview', 'Rejected', 'Offer'];
+      node.innerHTML = applications.map(item => `
+        <article class="application">
+          <h3>${esc(item.title)}</h3>
+          <div class="meta">${esc(item.company)} · ${esc(item.status)} · score ${esc(item.score)}</div>
+          <div class="actions">
+            ${statuses.map(status => `<button class="secondary" type="button" data-status="${item.id}:${status}" ${item.status === status ? 'disabled' : ''}>${status}</button>`).join('')}
+          </div>
+        </article>
+      `).join('');
+      node.querySelectorAll('[data-status]').forEach(button => {
+        const [id, status] = button.dataset.status.split(':');
+        button.addEventListener('click', () => setStatus(id, status));
+      });
+    }
+
+    function renderNews(news) {
+      const node = document.getElementById('news');
+      if (!news.length) {
+        node.innerHTML = '<div class="meta">No news collected yet.</div>';
+        return;
+      }
+      node.innerHTML = news.map(item => `
+        <article class="news">
+          <h3><a href="${esc(item.url)}" target="_blank" rel="noreferrer">${esc(item.title)}</a></h3>
+          <div class="meta">${esc(item.source)} · ${esc(item.category || 'Breaking AI News')} · importance ${esc(item.importance)}</div>
+        </article>
+      `).join('');
+    }
+
     async function loadData() {
+      const status = document.getElementById('status');
       try {
         const location = encodeURIComponent(document.getElementById('location').value);
         const experience = encodeURIComponent(document.getElementById('experience').value);
-        const [jobs, news] = await Promise.all([
-          fetch(`${api}/jobs?minimum_score=35&location=${location}&experience_level=${experience}`).then(response => response.json()),
-          fetch(`${api}/news?limit=8`).then(response => response.json())
+        const remote = encodeURIComponent(document.getElementById('remote').value);
+        const india = encodeURIComponent(document.getElementById('india').value);
+        const [jobs, news, applications, summary] = await Promise.all([
+          fetch(`${api}/jobs?minimum_score=35&location=${location}&experience_level=${experience}&remote_status=${remote}&india_eligibility=${india}`).then(readJson),
+          fetch(`${api}/news?limit=8`).then(readJson),
+          fetch(`${api}/applications`).then(readJson),
+          fetch(`${api}/summary`).then(readJson)
         ]);
-        document.getElementById('status').textContent = 'Live intelligence feed';
-        document.getElementById('jobs').innerHTML = jobs.length ? jobs.map(job => `<article class="job"><span class="score">${job.score}/100</span><h3>${esc(job.title)}</h3><div class="meta">${esc(job.company)} · ${esc(job.location)} · ${esc(job.experience_level || job.experience)}${job.experience_conflict ? ' · Conflicting experience requirements' : ''}<br>${esc(job.experience_evidence || '')}<br><a href="${esc(job.application_url || job.listing_url)}" target="_blank" rel="noreferrer">Open application</a></div></article>`).join('') : '<div class="meta">No matching jobs yet.</div>';
-        document.getElementById('news').innerHTML = news.map(item => `<article class="news"><h3><a href="${esc(item.url)}" target="_blank" rel="noreferrer">${esc(item.title)}</a></h3><div class="meta">${esc(item.source)} · importance ${item.importance}</div></article>`).join('') || '<div class="meta">No news collected yet.</div>';
-      } catch (error) { document.getElementById('status').textContent = 'API unavailable'; }
+        trackedJobIds = new Set(list(applications).map(item => item.job_id));
+        status.textContent = `${summary.jobs} jobs · ${summary.alerts} alerts · ${summary.news} articles`;
+        renderJobs(list(jobs));
+        renderApplications(list(applications));
+        renderNews(list(news));
+      } catch (error) {
+        status.textContent = 'API unavailable';
+        document.getElementById('jobs').innerHTML = '<div class="meta">Start the API with python api.py, then refresh.</div>';
+      }
     }
+
+    document.getElementById('refresh').addEventListener('click', loadData);
+    document.getElementById('location').addEventListener('keydown', event => {
+      if (event.key === 'Enter') loadData();
+    });
+    ['experience', 'remote', 'india'].forEach(id => {
+      document.getElementById(id).addEventListener('change', loadData);
+    });
     loadData();
   </script>
 </body>

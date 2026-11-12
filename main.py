@@ -41,6 +41,34 @@ def run(daily_report=False, path=DB_PATH):
     return {"results": results, "issues": failures}
 
 
+CRITICAL_MARKERS = (
+    "engine failed",
+    "processing failed",
+    "notification failed",
+    "report failed",
+)
+
+
+def exit_status(result):
+    """Fail the process when an engine is down or an alert could not be delivered.
+
+    A single source outage is recorded and printed, but it does not fail the run
+    when another source still produced results.
+    """
+    results = result["results"]
+    if "jobs" not in results or "news" not in results:
+        return 1
+    for name in ("jobs", "news"):
+        engine = results[name]
+        if engine.get("sources_checked", 0) == 0 and engine.get("issues"):
+            return 1
+    for issue in result["issues"]:
+        lowered = issue.lower()
+        if any(marker in lowered for marker in CRITICAL_MARKERS):
+            return 1
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run the AI/ML job and news engines.")
     parser.add_argument(
@@ -50,7 +78,7 @@ def main(argv=None):
     )
     arguments = parser.parse_args(argv)
     result = run(daily_report=arguments.daily_report)
-    return 1 if result["issues"] else 0
+    return exit_status(result)
 
 
 if __name__ == "__main__":

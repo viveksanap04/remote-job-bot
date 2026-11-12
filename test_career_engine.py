@@ -1,9 +1,16 @@
 import unittest
 
+import sqlite3
+import tempfile
+from pathlib import Path
+
 from career_engine import (
     analyze_experience,
+    create_application,
     detect_experience,
+    detect_location,
     india_eligibility_status,
+    initialize_database,
     is_fresher_experience,
     is_fully_remote,
     is_india_eligible,
@@ -40,6 +47,14 @@ class JobEligibilityTests(unittest.TestCase):
         self.assertEqual(
             analyze_experience("AI Engineer", "Experience not specified")["level"],
             "Experience not specified",
+        )
+        self.assertEqual(
+            analyze_experience("ML Engineer", "2+ years of experience")["level"],
+            "2–3 Years",
+        )
+        self.assertEqual(
+            analyze_experience("ML Engineer", "1-3 years of experience")["level"],
+            "2–3 Years",
         )
 
     def test_experience_analysis_distinguishes_preferred_and_conflicting_ranges(self):
@@ -95,6 +110,23 @@ class JobEligibilityTests(unittest.TestCase):
         self.assertEqual(india_eligibility_status(), "unknown")
         self.assertEqual(india_eligibility_status(location="US only"), "ineligible")
         self.assertFalse(is_india_eligible("Applicants are not eligible in India"))
+        self.assertFalse(is_india_eligible(location="Indiana"))
+        self.assertEqual(detect_location("Indiana, USA"), "US")
+        self.assertEqual(detect_location("Bengaluru, India"), "India")
+
+    def test_application_tracking_keeps_one_row_per_job(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "career.db")
+            initialize_database(path)
+            first = create_application(7, path)
+            second = create_application(7, path)
+            connection = sqlite3.connect(path)
+            try:
+                count = connection.execute("SELECT COUNT(*) FROM applications").fetchone()[0]
+            finally:
+                connection.close()
+        self.assertEqual(first, second)
+        self.assertEqual(count, 1)
 
     def test_match_score_uses_skills_role_experience_and_india_eligibility(self):
         eligible_score = score_job(
