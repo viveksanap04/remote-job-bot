@@ -30,6 +30,7 @@ from career_engine import (
     score_job,
 )
 from telegram_utils import send_telegram_message
+from telegram_bot import enqueue_job_alerts
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -691,6 +692,8 @@ def process_job(job, source, sent_urls, path=DB_PATH):
         "analysis": analysis,
     }
     is_new = save_job(job_record, path)
+    if is_new:
+        enqueue_job_alerts(job_record, path)
 
     if not eligible_for_alert or has_job_alerted(analysis["dedupe_key"], path):
         return is_new, False

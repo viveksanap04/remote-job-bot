@@ -41,3 +41,21 @@ Items must match AI/ML topics before storage. URLs and similar article content a
 `main.py` is the orchestration entry point. It runs the job engine and then the news engine independently, so a failed engine does not prevent the other from running. The GitHub Actions workflow runs hourly and at 00:00 Asia/Kolkata (18:30 UTC) for the daily news report. Manual workflow dispatch also requests the daily report, with database deduplication preventing another post on the same local date.
 
 The workflow uses the existing `BOT_TOKEN` and `CHAT_ID` secrets. For local runs, set them in `.env`, which is excluded by `.gitignore`, then run `python main.py`; use `python main.py --daily-report` to request the once-per-day report.
+
+## Telegram chatbot
+
+The Telegram integration supports both FastAPI webhooks and a persistent long-polling worker. Use exactly one mode for a bot token at a time; Telegram does not allow `getUpdates` while a webhook is active.
+
+The bot supports `/search`, `/prefs`, `/saved`, `/track`, `/unsubscribe`, and `/help`, plus natural-language search. Inline job actions save, track, or dismiss a listing; an Apply button opens the stored listing/application URL. Preferences and saved jobs are scoped to Telegram user IDs. Incoming update IDs are deduplicated and outbound messages are stored in a retryable SQLite outbox.
+
+Required settings:
+
+- `BOT_TOKEN` — Telegram bot token.
+- `DATABASE_PATH` — optional path to the persistent SQLite database; keep it on durable storage shared by the API, job collector, and bot worker.
+- `TELEGRAM_WEBHOOK_SECRET` — required for webhook mode.
+
+For polling mode, run `python telegram_polling.py` as a persistent process. Run `python telegram_polling.py --clear-webhook` when switching from webhook mode. For webhook mode, serve FastAPI behind a public HTTPS reverse proxy (for example `uvicorn api:app --host 0.0.0.0 --port 8000`) and configure the bot with `python telegram_polling.py --set-webhook https://your-host/telegram/webhook`. Run `python telegram_polling.py --set-commands` once to add the command menu to Telegram.
+
+Optional natural-language interpretation is disabled by default. To enable it, configure `LLM_API_URL` (an OpenAI-compatible chat-completions endpoint), `LLM_API_KEY`, and `LLM_MODEL`; each user must also explicitly opt in with `/prefs llm on`. Only that user's search text is sent to the configured provider, and only when deterministic parsing did not identify search filters.
+
+The SQLite database now includes Telegram user IDs, preferences, saved-job state, update IDs, and pending notification text. The GitHub Actions workflow drops private chatbot and application tables before running its scheduled collector; its committed database is not a shared production database for the bot. Treat any live chatbot database as private user data: do not publish or commit it, and configure a durable private `DATABASE_PATH` before deployment. SQLite is intended for a single-host prototype, not multiple concurrently writing replicas.

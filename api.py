@@ -1,24 +1,47 @@
+import asyncio
+import logging
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+import requests
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from career_engine import DB_PATH, connect_database, create_application, initialize_database
+from telegram_bot import dispatch_pending, process_telegram_update, verify_webhook_secret
 
 
 DASHBOARD_PATH = Path(__file__).resolve().with_name("dashboard.html")
 APPLICATION_STATUSES = {"Saved", "Applied", "Interview", "Rejected", "Offer"}
+LOGGER = logging.getLogger(__name__)
+
+
+async def outbox_worker():
+    while True:
+        try:
+            await asyncio.to_thread(dispatch_pending)
+        except Exception:
+            LOGGER.exception("Telegram outbox worker failed")
+        await asyncio.sleep(15)
 
 
 @asynccontextmanager
 async def lifespan(_app):
     initialize_database()
-    yield
+    worker = asyncio.create_task(outbox_worker())
+    try:
+        yield
+    finally:
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title="Vishes AI Career Intelligence", lifespan=lifespan)
@@ -62,6 +85,24 @@ def dashboard():
 def health():
     query("SELECT 1 AS ok")
     return {"status": "ok"}
+
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(
+    request: Request,
+    secret_token: Optional[str] = Header(default=None, alias="X-Telegram-Bot-Api-Secret-Token"),
+):
+    if not verify_webhook_secret(secret_token):
+        raise HTTPException(status_code=403, detail="Invalid Telegram webhook secret")
+    try:
+        update = await request.json()
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Invalid JSON update") from error
+    try:
+        await run_in_threadpool(process_telegram_update, update)
+    except (requests.RequestException, RuntimeError, ValueError, sqlite3.Error) as error:
+        raise HTTPException(status_code=503, detail="Unable to process Telegram update") from error
+    return {"ok": True}
 
 
 @app.get("/summary")

@@ -1,13 +1,19 @@
+import os
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from dotenv import load_dotenv
+
+
+load_dotenv(Path(__file__).resolve().with_name(".env"))
 
 INDIA_TIMEZONE = timezone(timedelta(hours=5, minutes=30))
 
 
-DB_PATH = "career_intelligence.db"
+DB_PATH = os.getenv("DATABASE_PATH", "career_intelligence.db")
 
 TRACKING_PARAMETERS = {
     "fbclid",
@@ -665,12 +671,71 @@ def initialize_database(path=DB_PATH):
                 sent_at TEXT NOT NULL,
                 PRIMARY KEY (report_date, report_type)
             );
+            CREATE TABLE IF NOT EXISTS telegram_users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_user_id INTEGER NOT NULL UNIQUE,
+                chat_id INTEGER NOT NULL,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                unsubscribed_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                user_id INTEGER PRIMARY KEY,
+                desired_skills TEXT NOT NULL DEFAULT '',
+                location TEXT NOT NULL DEFAULT '',
+                experience_level TEXT NOT NULL DEFAULT '',
+                remote_status TEXT NOT NULL DEFAULT 'fully_remote',
+                india_eligibility TEXT NOT NULL DEFAULT '',
+                alerts_enabled INTEGER NOT NULL DEFAULT 1,
+                llm_enabled INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(user_id) REFERENCES telegram_users(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS user_saved_jobs (
+                user_id INTEGER NOT NULL,
+                job_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Saved',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, job_id),
+                FOREIGN KEY(user_id) REFERENCES telegram_users(id) ON DELETE CASCADE,
+                FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS notification_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                chat_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                reply_markup TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT NOT NULL,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                sent_at TEXT,
+                UNIQUE(user_id, dedupe_key),
+                FOREIGN KEY(user_id) REFERENCES telegram_users(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS telegram_updates (
+                update_id INTEGER PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'processing',
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS telegram_runtime_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_jobs_priority
                 ON jobs (score DESC, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_news_priority
                 ON news (importance DESC, published_at DESC);
             CREATE INDEX IF NOT EXISTS idx_jobs_notified
                 ON jobs (dedupe_key, notified_at);
+            CREATE INDEX IF NOT EXISTS idx_notification_outbox_pending
+                ON notification_outbox (status, next_attempt_at, id);
             """
         )
         connection.execute("DROP TABLE IF EXISTS daily_skill_metrics")

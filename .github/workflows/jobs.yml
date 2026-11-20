@@ -42,6 +42,10 @@ jobs:
       - name: Run test suite
         run: python -m unittest discover -v
 
+      - name: Remove private chatbot and application data from scheduled-run database
+        run: |
+          python -c "import sqlite3; connection = sqlite3.connect('career_intelligence.db'); tables = ('telegram_updates', 'telegram_runtime_state', 'notification_outbox', 'user_saved_jobs', 'user_preferences', 'telegram_users', 'applications'); [connection.execute('DROP TABLE IF EXISTS ' + table) for table in tables]; connection.commit(); connection.close()"
+
       - name: Create sent_jobs.json
         run: |
           if [ ! -f sent_jobs.json ]; then
